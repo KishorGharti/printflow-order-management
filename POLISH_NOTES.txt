@@ -1,0 +1,23 @@
+Print Ghar Order Manager — Safe Polish Pass
+Date: 2026-09-08
+
+Scope
+- No business feature, calculation, stored-data shape, order workflow, payment logic, PDF logic, WhatsApp logic, stock logic or team logic was intentionally changed.
+
+Presentation / usability improvements
+- Added intentional loading skeleton for slow first load.
+- Added skip-to-content keyboard accessibility.
+- Added active navigation semantics and a clearer active indicator.
+- Added accessible labels to global order search and status selector.
+- Changed the misleading status label “Delete” to “Cancel Order”; the existing cancellation/history behavior remains unchanged.
+- Improved disabled control states and interaction cues.
+- Removed misleading pointer cursor from passive table rows.
+- Improved numeric readability in data tables.
+- Improved horizontal-scroll behavior on dense tables.
+- Improved native file-input presentation.
+- Added mobile viewport/modal handling and mobile input sizing.
+- Added dark-mode and print corrections for the new UI primitives.
+
+Verification
+- npm run build: PASS
+- npm test: 50/50 PASS

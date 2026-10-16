@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PrintFlow — Developer Admin Console</title>
+  <meta name="description" content="Exclusive platform developer and SaaS owner administration dashboard for PrintFlow." />
+  <link rel="icon" type="image/svg+xml"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230f172a'/%3E%3Cpath d='M20 22l-8 10 8 10M44 22l8 10-8 10M36 16l-8 32' fill='none' stroke='%2338bdf8' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
+    rel="stylesheet">
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Plus Jakarta Sans', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            navy: {
+              800: '#1e293b',
+              900: '#0f172a',
+              950: '#020617',
+            },
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        },
+      },
+    }
+  </script>
+
+  <style>
+    :root {
+      --dev-bg: #f8fafc;
+      --dev-card: #ffffff;
+      --dev-border: #e2e8f0;
+      --dev-navy: #0f172a;
+      --dev-navy-card: #1e293b;
+      --dev-accent: #3b82f6;
+    }
+
+    html, body, #developer-root {
+      height: 100%;
+      min-height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--dev-bg);
+      color: #0f172a;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overflow: hidden;
+    }
+
+    /* Custom smooth scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #f1f5f9;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+
+    /* Dark smooth scrollbar for sidebar nav */
+    aside nav::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    aside nav::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 9999px;
+    }
+    aside nav::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+
+    .glass-navy {
+      background: rgba(15, 23, 42, 0.95);
+      backdrop-filter: blur(12px);
+    }
+
+    .badge-glow {
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.35);
+    }
+  </style>
+</head>
+
+<body class="bg-slate-50 text-slate-900 h-full overflow-hidden">
+  <!-- React Root Container -->
+  <div id="developer-root">
+    <!-- Initial Skeleton Loader before React mounts -->
+    <div class="min-h-screen flex items-center justify-center bg-slate-900 text-white">
+      <div class="text-center p-8">
+        <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600 mb-4 shadow-xl shadow-indigo-500/20 animate-pulse">
+          <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+          </svg>
+        </div>
+        <h2 class="text-xl font-bold text-slate-100 mb-1">PrintFlow Developer Console</h2>
+        <p class="text-sm text-slate-400">Loading secure platform dashboard...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- React 18 & ReactDOM 18 UMD Scripts -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+  <!-- Developer Console Application Script -->
+  <script src="/dist/developer.js"></script>
+
+  <script>
+    // Fail-safe if script loading stalls
+    window.setTimeout(function () {
+      var root = document.getElementById('developer-root');
+      if (root && root.querySelector('.animate-pulse')) {
+        root.innerHTML = '<div class="min-h-screen flex items-center justify-center bg-slate-900 text-white p-6"><div class="max-w-md bg-slate-800 border border-slate-700 rounded-2xl p-6 text-center"><h3 class="text-lg font-bold text-rose-400 mb-2">Connection Timeout</h3><p class="text-sm text-slate-300 mb-4">Could not load developer console dependencies. Please check network connection and try again.</p><button onclick="location.reload()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 font-semibold rounded-lg text-sm text-white">Reload</button></div></div>';
+      }
+    }, 7000);
+  </script>
+</body>
+
+</html>

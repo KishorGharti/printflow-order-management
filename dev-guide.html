@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PrintFlow SaaS — Developer Admin Console Complete Guide & Architecture Reference</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+    @page {
+      size: A4;
+      margin: 14mm 14mm 14mm 14mm;
+      @bottom-right {
+        content: counter(page);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #0f172a;
+      background: #ffffff;
+      margin: 0;
+      padding: 0;
+      font-size: 11pt;
+      line-height: 1.55;
+    }
+
+    .cover {
+      page-break-after: always;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 92vh;
+      padding: 30px 20px 20px 20px;
+      border: 2px solid #e2e8f0;
+      border-radius: 20px;
+      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+      color: #ffffff;
+    }
+
+    .cover-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(255, 255, 255, 0.1);
+      padding: 8px 16px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      font-size: 10pt;
+      color: #38bdf8;
+    }
+
+    .cover-title {
+      margin-top: 60px;
+    }
+
+    .cover-title h1 {
+      font-size: 32pt;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin: 0 0 12px 0;
+      line-height: 1.15;
+      background: linear-gradient(135deg, #ffffff 30%, #93c5fd 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .cover-title .subtitle {
+      font-size: 14pt;
+      color: #94a3b8;
+      font-weight: 500;
+      max-width: 600px;
+      line-height: 1.4;
+      margin-bottom: 24px;
+    }
+
+    .cover-meta {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 14px;
+      padding: 18px 20px;
+      font-size: 9.5pt;
+    }
+
+    .cover-meta-item strong {
+      display: block;
+      color: #38bdf8;
+      text-transform: uppercase;
+      font-size: 7.5pt;
+      letter-spacing: 0.08em;
+      margin-bottom: 2px;
+    }
+
+    .cover-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 8.5pt;
+      color: #64748b;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      padding-top: 15px;
+    }
+
+    /* General Typography & Page Layout */
+    h2 {
+      font-size: 17pt;
+      font-weight: 800;
+      color: #0f172a;
+      letter-spacing: -0.02em;
+      margin: 28px 0 10px 0;
+      padding-bottom: 6px;
+      border-bottom: 2px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    h3 {
+      font-size: 13pt;
+      font-weight: 700;
+      color: #1e293b;
+      margin: 20px 0 8px 0;
+    }
+
+    h4 {
+      font-size: 11pt;
+      font-weight: 700;
+      color: #334155;
+      margin: 14px 0 4px 0;
+    }
+
+    p {
+      margin: 0 0 10px 0;
+      color: #334155;
+    }
+
+    .module-header {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-left: 5px solid #4f46e5;
+      border-radius: 12px;
+      padding: 14px 18px;
+      margin: 18px 0 14px 0;
+    }
+
+    .module-header h2 {
+      border: none;
+      padding: 0;
+      margin: 0 0 4px 0;
+      color: #1e1b4b;
+    }
+
+    .module-header .module-desc {
+      font-size: 9.5pt;
+      color: #64748b;
+      margin: 0;
+    }
+
+    /* Cards & Callouts */
+    .feature-card {
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 10px 0 14px 0;
+      page-break-inside: avoid;
+    }
+
+    .scenario-box {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-left: 4px solid #16a34a;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin: 10px 0 12px 0;
+      font-size: 9.5pt;
+      page-break-inside: avoid;
+    }
+
+    .scenario-box .title {
+      font-weight: 800;
+      color: #166534;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      font-size: 8pt;
+      letter-spacing: 0.05em;
+    }
+
+    .example-box {
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin: 8px 0;
+      font-size: 9pt;
+      page-break-inside: avoid;
+    }
+
+    .example-box .label {
+      font-weight: 700;
+      color: #475569;
+      font-size: 7.5pt;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 4px;
+    }
+
+    .code-pill {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 8.5pt;
+      background: #e2e8f0;
+      color: #0f172a;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 8.5pt;
+      padding: 10px 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 6px 0;
+      line-height: 1.4;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      font-size: 7pt;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 2px 7px;
+      border-radius: 9999px;
+      vertical-align: middle;
+    }
+    .badge-indigo { background: #e0e7ff; color: #3730a3; }
+    .badge-emerald { background: #d1fae5; color: #065f46; }
+    .badge-rose { background: #ffe4e6; color: #9f1239; }
+    .badge-amber { background: #fef3c7; color: #92400e; }
+    .badge-slate { background: #f1f5f9; color: #334155; }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 9pt;
+      margin: 10px 0 14px 0;
+      page-break-inside: avoid;
+    }
+
+    th {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      padding: 7px 10px;
+      text-align: left;
+      font-weight: 700;
+      color: #475569;
+      font-size: 7.5pt;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    td {
+      border: 1px solid #e2e8f0;
+      padding: 7px 10px;
+      vertical-align: top;
+      color: #334155;
+    }
+
+    tr:nth-child(even) td {
+      background: #fbfcfe;
+    }
+
+    .page-break {
+      page-break-before: always;
+    }
+
+    ul, ol {
+      margin: 4px 0 10px 0;
+      padding-left: 20px;
+      font-size: 10pt;
+    }
+
+    li {
+      margin-bottom: 4px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ==================== COVER PAGE ==================== -->
+  <div class="cover">
+    <div class="cover-top">
+      <div class="logo-badge">
+        <span>⚡</span> PRINTFLOW PLATFORM CORE
+      </div>
+      <div style="font-family: 'JetBrains Mono', monospace; font-size: 9pt; color: #94a3b8;">
+        PORTAL: /developer
+      </div>
+    </div>
+
+    <div class="cover-title">
+      <h1>Developer Admin Console</h1>
+      <div class="subtitle">
+        Architectural Specification, Feature Manual & Practical Real-World Scenarios for Platform Engineers & SaaS Admins
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <span class="badge badge-indigo" style="font-size: 8.5pt; padding: 4px 10px;">Full Stack Telemetry</span>
+        <span class="badge badge-emerald" style="font-size: 8.5pt; padding: 4px 10px;">PostgreSQL 17 Relational Core</span>
+        <span class="badge badge-amber" style="font-size: 8.5pt; padding: 4px 10px;">Multi-Tenant SaaS Licensing</span>
+        <span class="badge badge-rose" style="font-size: 8.5pt; padding: 4px 10px;">Mini-Sentry Live Crash Interceptor</span>
+      </div>
+    </div>
+
+    <div class="cover-meta">
+      <div class="cover-meta-item">
+        <strong>Platform Release</strong>
+        PrintFlow SaaS Engine v2.4.0 (Unified Stack)
+      </div>
+      <div class="cover-meta-item">
+        <strong>Security Clearance</strong>
+        SUPER_ADMIN / DEVELOPER Role Only
+      </div>
+      <div class="cover-meta-item">
+        <strong>Multi-Tenant Architecture</strong>
+        Multi-Tenant Row-Level Shared Postgres Cluster
+      </div>
+      <div class="cover-meta-item">
+        <strong>Active Telemetry</strong>
+        Mini-Sentry Crash Tracing, Rolling Backups & SQL Playground
+      </div>
+    </div>
+
+    <div class="cover-footer">
+      <div>CONFIDENTIAL & PROPRIETARY — PRINTFLOW PLATFORM ARCHITECTURE</div>
+      <div>Kathmandu, Nepal • October 2026</div>
+    </div>
+  </div>
+
+  <!-- ==================== EXECUTIVE SUMMARY & SECURITY MODEL ==================== -->
+  <h2>1. Platform Architecture & Security Clearance Model</h2>
+  <p>
+    The <strong>PrintFlow Developer Admin Console</strong> (accessible via <code>/developer</code>) is the centralized mission-control cockpit engineered exclusively for platform developers, systems engineers, and root SaaS administrators. It stands isolated above individual print shop instances, granting complete visibility, telemetry, diagnostics, and multi-tenant management across all tenant stores.
+  </p>
+
+  <div class="feature-card">
+    <h3 style="margin-top: 0;">Multi-Tier Separation & RBAC Security Boundaries</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Portal Path</th>
+          <th>Authorized Persona</th>
+          <th>Authentication Method</th>
+          <th>Access Scope</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="code-pill">/developer</span></td>
+          <td>Platform Developers & Super Admins</td>
+          <td>Developer Credentials / API Master Key</td>
+          <td>Global Platform Super-Admin: DB, Servers, Backups, Tenants, Logs</td>
+        </tr>
+        <tr>
+          <td><span class="code-pill">/owner/login</span></td>
+          <td>Print Shop Owners & Franchisees</td>
+          <td>Store Owner Email + Password + OTP</td>
+          <td>Single Tenant Store: Financials, Staff, Inventory, Pricing, Store Orders</td>
+        </tr>
+        <tr>
+          <td><span class="code-pill">/employee/login</span></td>
+          <td>Reception, Designers, Finishers</td>
+          <td>Store-Prefixed Employee ID + PIN/Pass</td>
+          <td>Workstation Level: Reception POS, Design Kanban, Production Queue</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="scenario-box">
+    <div class="title">🛡️ Security Guardrail: Client Intrusion Prevention</div>
+    <strong>Situation:</strong> A curious print shop owner or employee discovers the URL <code>http://localhost:3000/developer</code> and attempts to view raw databases or modify other tenants' plans.<br>
+    <strong>How it works:</strong> The backend middleware <span class="code-pill">requireDeveloperAccess</span> strictly validates the incoming JWT payload against the role table. If the role is <code>owner</code>, <code>reception</code>, or <code>designer</code>, the request is instantly rejected with HTTP <strong>403 Forbidden</strong>: <em>"Access denied. This endpoint is strictly restricted to SUPER_ADMIN / DEVELOPER."</em> The developer console never leaks tenant data across portal borders.
+  </div>
+
+  <!-- ==================== MODULE 1 ==================== -->
+  <div class="page-break"></div>
+  <div class="module-header">
+    <h2>2. Module 1: API & Server Status (<span class="code-pill">ServerStatusView</span>)</h2>
+    <div class="module-desc">Real-time Node.js process telemetry, memory health, rate-limiting counters, and live log stream interceptors.</div>
+  </div>
+
+  <h3>Key Features & Telemetry Gauges</h3>
+  <ul>
+    <li><strong>API / Backend Process Status:</strong> Displays API Port (3001), Web Portal Proxy Port (3000), Active Node Version (<code>v22.18.0</code>), OS Architecture (<code>win32 x64</code>), Process PID, and running uptime.</li>
+    <li><strong>Memory Footprint & Heap Monitor:</strong> Gauges Heap Memory Used (MB), Heap Total Allocation, RSS (Resident Set Size), and a visual memory saturation bar.</li>
+    <li><strong>PostgreSQL Engine Ping:</strong> Real-time latency measurement in milliseconds (e.g. <code>1ms Ping</code>), active connection pool count, and idle vs. total connection pool metrics.</li>
+    <li><strong>Traffic & Rate-Limiting Controller:</strong> Live counter of incoming requests per minute (req/min), total processed server hits, and blocked requests against the threshold (e.g. 500 req/min).</li>
+  </ul>
+
+  <h3>The 5 Real-Time Log Sub-Streams</h3>
+  <div class="feature-card">
+    <table>
+      <thead>
+        <tr>
+          <th>Stream Tab</th>
+          <th>What it Monitors</th>
+          <th>Developer Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Mini-Sentry Crash Traces</strong></td>
+          <td>Uncaught exceptions, unhandled Promise rejections, and runtime 500 crashes.</td>
+          <td>Provides full stack traces, method/route, tenant ID, and user email with one-click resolution.</td>
+        </tr>
+        <tr>
+          <td><strong>Error Logs</strong></td>
+          <td>API-level handled errors (validation failures, 400 Bad Requests, DB constraint violations).</td>
+          <td>Tracks failing API endpoints, parameters, and IP addresses.</td>
+        </tr>
+        <tr>
+          <td><strong>Failed Requests</strong></td>
+          <td>Any HTTP 4xx or 5xx responses with measured latency in milliseconds.</td>
+          <td>Identifies slow endpoints and client integration anomalies.</td>
+        </tr>
+        <tr>
+          <td><strong>Authentication Logs</strong></td>
+          <td>Login events, token refreshes, failed passwords, and session terminations.</td>
+          <td>Detects brute-force credential stuffing attacks against print shops.</td>
+        </tr>
+        <tr>
+          <td><strong>Recent System Activity</strong></td>
+          <td>High-level business audit events across all shops (orders booked, expenses recorded).</td>
+          <td>Bird's-eye view of nationwide platform activity.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="scenario-box">
+    <div class="title">💡 Real-World Situation: Diagnosing an Order Creation Crash</div>
+    <strong>Situation:</strong> The Bagbazar branch reports: <em>"When we upload a heavy 80MB TIFF poster file for flex printing, the order submission hangs and fails!"</em><br>
+    <strong>How Developer Works with Example:</strong>
+    <ol style="margin-top: 4px; padding-left: 18px;">
+      <li>The developer navigates to <strong>API & Server Status</strong> &rarr; clicks <strong>Mini-Sentry Crash Traces</strong>.</li>
+      <li>A highlighted red badge appears: <code>POST /api/orders — 500 Internal Server Error</code>.</li>
+      <li>Clicking <strong>Inspect Error</strong> reveals:
+        <pre>PayloadTooLargeError: request entity too large
+  at readStream (C:\...\node_modules\raw-body\index.js:246:17)
+  Business: bagbazar-shop | User: reception@bagbazar.com | IP: 103.20.14.2</pre>
+      </li>
+      <li><strong>Immediate Fix:</strong> The developer diagnoses that the reverse-proxy body limit was capped at 50MB. Without guessing, the exact file, tenant, and stack trace were pinpointed in seconds.</li>
+    </ol>
+  </div>
+
+  <!-- ==================== MODULE 2 ==================== -->
+  <div class="page-break"></div>
+  <div class="module-header">
+    <h2>3. Module 2: Database & Data Management (<span class="code-pill">DatabaseView</span>)</h2>
+    <div class="module-desc">PostgreSQL storage inspection, table relation metrics, automated backups, and Safe SQL Playground.</div>
+  </div>
+
+  <h3>PostgreSQL Cluster Diagnostics</h3>
+  <ul>
+    <li><strong>Storage Allocation:</strong> Live display of total database size (e.g. <code>12 MB</code>), 21 active relational tables, and estimated cluster record count.</li>
+    <li><strong>Table Storage & Index Footprint:</strong> Detailed breakdown of every Postgres table (<code>orders</code>, <code>saas_clients</code>, <code>team_members</code>, <code>inventory_items</code>, <code>payments</code>, etc.) showing Row Count, Table Data Size, and Index Footprint.</li>
+    <li><strong>Multi-Tenant Data Consumption:</strong> Shows how many orders, customers, and total booked revenue each registered shop has generated.</li>
+  </ul>
+
+  <h3>Database Operations & Disaster Recovery</h3>
+  <div class="feature-card">
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
+      <div style="background: #eef2ff; padding: 10px; border-radius: 8px;">
+        <strong style="color: #4338ca; font-size: 9pt;">Download Full Backup</strong>
+        <p style="font-size: 8.5pt; margin: 4px 0 0 0;">Generates an instantaneous full offline JSON snapshot of all database tables and downloads it to the developer's workstation.</p>
+      </div>
+      <div style="background: #fdf2f8; padding: 10px; border-radius: 8px;">
+        <strong style="color: #9d174d; font-size: 9pt;">Restore Database</strong>
+        <p style="font-size: 8.5pt; margin: 4px 0 0 0;">Uploads an offline JSON snapshot, validating schemas and repopulating missing records in disaster recovery scenarios.</p>
+      </div>
+      <div style="background: #f0fdf4; padding: 10px; border-radius: 8px;">
+        <strong style="color: #15803d; font-size: 9pt;">Verify & Run Migrations</strong>
+        <p style="font-size: 8.5pt; margin: 4px 0 0 0;">Runs automated schema migration scripts, guaranteeing tables, foreign keys, and indexes are in sync with application code.</p>
+      </div>
+    </div>
+  </div>
+
+  <h3>Automated Scheduled Backups (Rolling 7-Day Retention)</h3>
+  <p>
+    An automated background cron runner triggers database snapshot creation daily at midnight. The system calculates backup file age (e.g., <code>14h ago</code>) and enforces a <strong>7-day rolling disk retention policy</strong>, automatically purging snapshots older than 7 days to preserve server disk space. The developer can trigger <strong>"Run Backup Now"</strong> on-demand or click <strong>Download</strong> on any archived snapshot.
+  </p>
+
+  <h3>Safe SQL Query Playground & Database Inspector</h3>
+  <p>
+    A built-in interactive terminal allows developers to run diagnostic SQL queries directly against PostgreSQL without opening external tools like pgAdmin or terminal SSH.
+  </p>
+  <ul>
+    <li><strong>Read-Only Guard:</strong> Only statements starting with <code>SELECT</code>, <code>EXPLAIN</code>, and <code>WITH</code> are permitted. Any destructive verbs (<code>DROP</code>, <code>DELETE</code>, <code>UPDATE</code>, <code>ALTER</code>, <code>TRUNCATE</code>) are strictly blocked with an explanatory error.</li>
+    <li><strong>Pre-Built Presets:</strong> Instant selector with pre-written queries (e.g., Recent Clients, High-Value Orders, Active Subscriptions).</li>
+    <li><strong>100-Row Safety Cap:</strong> Appends <code>LIMIT 100</code> automatically to prevent server memory exhaustion.</li>
+    <li><strong>Export to CSV:</strong> One-click button to download query results as a formatted CSV spreadsheet for business intelligence and reporting.</li>
+  </ul>
+
+  <div class="scenario-box">
+    <div class="title">💡 Real-World Situation: Answering an Audit Query & Revenue Verification</div>
+    <strong>Situation:</strong> The platform accountant needs an immediate audit of all shops that generated over Rs. 50,000 in printing orders this month.<br>
+    <strong>How Developer Works with Example:</strong>
+    <ol style="margin-top: 4px; padding-left: 18px;">
+      <li>Developer opens <strong>Database / Data</strong> &rarr; scrolls to <strong>Safe SQL Playground</strong>.</li>
+      <li>Types the query:
+        <pre>SELECT b.name, b.subscription_plan, COUNT(o.id) as total_orders, 
+       SUM(o.final_total) as booked_revenue
+FROM saas_clients b
+LEFT JOIN orders o ON o.business_id = b.business_id
+GROUP BY b.id, b.name, b.subscription_plan
+HAVING SUM(o.final_total) > 50000
+ORDER BY booked_revenue DESC;</pre>
+      </li>
+      <li>Hits <code>Ctrl + Enter</code>. The execution completes in <strong>4ms</strong>.</li>
+      <li>Developer clicks <strong>Export CSV</strong> and emails the generated spreadsheet to finance. Zero server restarts, zero risk of data loss.</li>
+    </ol>
+  </div>
+
+  <!-- ==================== MODULE 3 ==================== -->
+  <div class="page-break"></div>
+  <div class="module-header">
+    <h2>4. Module 3: Security & Session Control (<span class="code-pill">SecurityView</span>)</h2>
+    <div class="module-desc">Live multi-tenant session monitoring, one-click token revocation, emergency kill-switches, and brute-force defenses.</div>
+  </div>
+
+  <h3>Security KPIs & Active Sessions Monitor</h3>
+  <ul>
+    <li><strong>Live Active Sessions:</strong> Real-time counter of every staff member and owner currently logged in across all connected print shops.</li>
+    <li><strong>Failed Login Attempts Counter:</strong> Tracks blocked authentication requests, highlighting potential password-guessing attacks.</li>
+    <li><strong>Session Inspection Grid:</strong> Displays User Name, Email, Role (<code>owner</code>, <code>reception</code>, <code>designer</code>, <code>printer_finishing</code>), Tenant/Business ID, Last Activity timestamp, and status (<code>ACTIVE</code>, <code>OFFLINE</code>, <code>REVOKED</code>).</li>
+  </ul>
+
+  <h3>Emergency Revocation & Token Invalidation</h3>
+  <div class="feature-card">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+      <div style="border-left: 3px solid #f43f5e; padding-left: 10px;">
+        <strong>Per-User Session Revocation</strong>
+        <p style="font-size: 8.5pt; margin-top: 4px;">Clicking "Revoke" next to any user immediately terminates their JWT token and invalidates their session. The next time their browser makes an API request, they are kicked out to the login screen.</p>
+      </div>
+      <div style="border-left: 3px solid #be123c; padding-left: 10px;">
+        <strong>Global Emergency Kill-Switch ("Revoke All Active Sessions")</strong>
+        <p style="font-size: 8.5pt; margin-top: 4px;">Terminates every active session across all print shops simultaneously. Used during critical security updates, credential breaches, or system-wide secret rotations.</p>
+      </div>
+    </div>
+  </div>
+
+  <h3>Security Policy Configuration Form</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Setting Field</th>
+        <th>Default Value</th>
+        <th>Practical Function</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Session Timeout (Minutes)</strong></td>
+        <td>120 mins</td>
+        <td>Inactivity window before an idle staff workstation is automatically logged out.</td>
+      </tr>
+      <tr>
+        <td><strong>Max Failed Logins Before Lockout</strong></td>
+        <td>5 attempts</td>
+        <td>Number of incorrect PIN/password tries before a 15-minute temporary lockout is imposed.</td>
+      </tr>
+      <tr>
+        <td><strong>API Rate Limit (Requests/Min)</strong></td>
+        <td>500 req/min</td>
+        <td>Per-IP traffic throttle preventing DoS attacks and runaway infinite loops.</td>
+      </tr>
+      <tr>
+        <td><strong>Allowed IPs (Whitelisting)</strong></td>
+        <td><code>127.0.0.1, ::1</code></td>
+        <td>Optional restriction allowing developer console access strictly from trusted office VPNs or static IPs.</td>
+      </tr>
+      <tr>
+        <td><strong>Enforce Developer MFA</strong></td>
+        <td>Checkbox (Toggle)</td>
+        <td>Mandates multi-factor authentication for developer portal access.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="scenario-box">
+    <div class="title">💡 Real-World Situation: Compromised Staff Device & Targeted Revocation</div>
+    <strong>Situation:</strong> A designer at "Mohan Graphics" lost their personal laptop in a cafe while logged into PrintFlow.<br>
+    <strong>How Developer Works with Example:</strong>
+    <ol style="margin-top: 4px; padding-left: 18px;">
+      <li>Shop owner calls support in panic: <em>"Someone might access our confidential customer files and pending wedding card designs!"</em></li>
+      <li>Developer opens <strong>Security & Auth</strong> &rarr; filters for tenant <code>mohan-shop</code>.</li>
+      <li>Locates user: <code>Suman Shrestha (designer)</code> with Last Active: <code>10 mins ago</code>.</li>
+      <li>Developer clicks <strong>Revoke</strong> and confirms the action.</li>
+      <li>The designer's token is immediately blacklisted in PostgreSQL. Any attempt to use that laptop receives a 401 Unauthorized redirect. The business data is protected without affecting other staff members.</li>
+    </ol>
+  </div>
+
+  <!-- ==================== MODULE 4 ==================== -->
+  <div class="page-break"></div>
+  <div class="module-header">
+    <h2>5. Module 4: Global System Settings (<span class="code-pill">SettingsView</span>)</h2>
+    <div class="module-desc">Centralized platform branding, maintenance mode gating, email SMTP relay, and cloud file storage.</div>
+  </div>
+
+  <h3>Platform Branding & Identity</h3>
+  <p>
+    Configures the master application name (e.g. <code>PrintFlow SaaS</code>), custom logo URL, favicon URL, developer support email (<code>dev@printghar.com</code>), and 24/7 emergency contact hotline (<code>+977-9800000000</code>). These branding elements cascade dynamically to all client portals.
+  </p>
+
+  <h3>Maintenance Mode Kill-Switch</h3>
+  <div class="feature-card">
+    <h4 style="margin-top: 0; color: #b45309;">Controlled Maintenance State</h4>
+    <p style="font-size: 9.5pt;">
+      When activated, storefronts, owner dashboards, and employee portals display a friendly, polished maintenance screen: <em>"The system is undergoing scheduled maintenance. Please check back shortly."</em> Crucially, <strong>the Developer Console remains 100% online and accessible</strong>, allowing engineers to run database migrations, patch server code, and test APIs without end-users interfering with data integrity.
+    </p>
+  </div>
+
+  <h3>Email / SMTP Relay Configuration</h3>
+  <p>
+    Configures the global transactional email pipeline:
+  </p>
+  <ul>
+    <li><strong>SMTP Host:</strong> e.g. <code>smtp.gmail.com</code> (or SendGrid, Mailgun, Amazon SES).</li>
+    <li><strong>SMTP Port:</strong> Standard TLS port <code>587</code> or SSL port <code>465</code>.</li>
+    <li><strong>Sender Email & Display Name:</strong> e.g. <code>notifications@printghar.com</code> &rarr; <code>PrintFlow System</code>.</li>
+    <li><strong>Application:</strong> Powers the Owner 6-digit OTP Forgot Password recovery system, customer PDF invoice delivery, and daily automated management digests.</li>
+  </ul>
+
+  <h3>File Storage & Cloud CDN Pipeline</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Parameter</th>
+        <th>Configured Value</th>
+        <th>System Purpose</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Storage Provider</strong></td>
+        <td><code>Cloudinary Cloud CDN</code> (or Local Server Disk)</td>
+        <td>High-speed global asset delivery with automated image thumbnail generation.</td>
+      </tr>
+      <tr>
+        <td><strong>Max Upload Size</strong></td>
+        <td><code>50 MB</code> (configurable up to 200MB)</td>
+        <td>Enforces payload restrictions to prevent client uploads from crashing server memory.</td>
+      </tr>
+      <tr>
+        <td><strong>Allowed Formats</strong></td>
+        <td><code>pdf, cdr, ai, psd, png, jpg, zip</code></td>
+        <td>Restricts file types strictly to printing design standards, blocking executable binaries (<code>.exe</code>, <code>.bat</code>).</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="scenario-box">
+    <div class="title">💡 Real-World Situation: Zero-Downtime Database Upgrade Maintenance</div>
+    <strong>Situation:</strong> The development team needs to run a 15-minute schema upgrade to alter order indexes.<br>
+    <strong>How Developer Works with Example:</strong>
+    <ol style="margin-top: 4px; padding-left: 18px;">
+      <li>Developer opens <strong>System Settings</strong> &rarr; enters Maintenance message: <em>"Upgrading PrintFlow core database. Back online at 2:00 AM."</em></li>
+      <li>Toggles <strong>Activate Maintenance Mode</strong> and clicks <strong>Update Maintenance Switch</strong>.</li>
+      <li>All client browsers are instantly intercepted with the maintenance banner; no corrupted orders can be submitted mid-migration.</li>
+      <li>Developer runs the database migrations via <strong>Database View</strong> &rarr; verifies all 21 tables.</li>
+      <li>Developer unchecks the maintenance toggle. All shops resume normal operations seamlessly.</li>
+    </ol>
+  </div>
+
+  <!-- ==================== MODULE 5 ==================== -->
+  <div class="page-break"></div>
+  <div class="module-header">
+    <h2>6. Module 5: Support, Tickets & Announcements (<span class="code-pill">SupportView</span>)</h2>
+    <div class="module-desc">Client support desk, global announcement banners, live role-targeted broadcast notifications, and developer contacts.</div>
+  </div>
+
+  <h3>Client Support Helpdesk & Triage</h3>
+  <ul>
+    <li><strong>Status Filters:</strong> Triage tickets across <code>All</code>, <code>Open</code>, <code>In Progress</code>, and <code>Resolved</code>.</li>
+    <li><strong>Priority Badges:</strong> Identifies urgent hardware issues vs general inquiries (<code>Urgent</code> Red, <code>High</code> Amber, <code>Medium</code> Slate, <code>Low</code> Green).</li>
+    <li><strong>Two-Way Communication:</strong> Developers can inspect client details (Client Name, Shop Name, Email, Date) and click <strong>Reply</strong> to send structured developer notes directly back to the print shop.</li>
+    <li><strong>One-Click Resolution:</strong> Clicking <strong>Mark Resolved</strong> updates ticket status in PostgreSQL.</li>
+  </ul>
+
+  <h3>System Announcement Engine</h3>
+  <p>
+    Enables developers to publish sticky banner notifications displayed across client dashboards:
+  </p>
+  <ul>
+    <li><strong>Severity Levels:</strong> <code>Informational</code> (Blue), <code>Warning</code> (Amber), <code>Critical Alert</code> (Red).</li>
+    <li><strong>Target Audience:</strong> Broadcast to <code>All Users</code>, <code>Clients Only</code> (Shop Owners), or <code>Production Staff Only</code> (Designers & Machine Operators).</li>
+    <li><strong>Self-Service Pruning:</strong> One-click "✕ Remove" button to delete outdated announcements.</li>
+  </ul>
+
+  <h3>Live Broadcast System Notification Dispatcher</h3>
+  <div class="feature-card">
+    <h4 style="margin-top: 0;">Instant Push Notification Dispatch</h4>
+    <p style="font-size: 9.5pt;">
+      Allows developers to send instant push messages without email latency. For example, broadcasting to <code>Production Staff Only</code>: <em>"Flex Plotter Driver v4.2 now deployed. Please refresh your browser workstations."</em> The message appears instantly on all active production terminals.
+    </p>
+  </div>
+
+  <div class="scenario-box">
+    <div class="title">💡 Real-World Situation: Resolving a Printer Driver Ticket & Notifying Staff</div>
+    <strong>Situation:</strong> The production team at "Kishor Offset Press" logs a support ticket: <em>"Thermal receipt printer is truncating the right margin on bill printouts."</em><br>
+    <strong>How Developer Works with Example:</strong>
+    <ol style="margin-top: 4px; padding-left: 18px;">
+      <li>Developer sees ticket in <strong>Support & Announcements</strong> with Priority: <code>High</code>.</li>
+      <li>Developer clicks <strong>Reply</strong>: <em>"We adjusted thermal paper width CSS from 72mm to 80mm in thermal print styles. Please refresh your browser."</em></li>
+      <li>Developer marks the ticket as <strong>Resolved</strong>.</li>
+      <li>To ensure immediate uptake, developer uses <strong>Broadcast System Notification</strong> with target <code>Production Staff Only</code>: <em>"Thermal receipt styling updated. Please press Ctrl+F5."</em></li>
+    </ol>
+  </div>
+
+  <!-- ==================== MODULE 6 ==================== -->
+  <div class="page-break"></div>
+  <div class="module-header">
+    <h2>7. Module 6: Multi-Tenant SaaS Clients Manager (<span class="code-pill">ClientsView</span>)</h2>
+    <div class="module-desc">Tenant provisioning, single-plan license lifecycle management, grace period tracking, and read-only locks.</div>
+  </div>
+
+  <h3>Tenant Directory & Search Capabilities</h3>
+  <ul>
+    <li><strong>Real-Time Search & Filtering:</strong> Instant search by client business name, email address, or phone number. Filter by <code>Active</code>, <code>Deactivated</code>, or <code>All</code>.</li>
+    <li><strong>Table Columns:</strong> Client Contact Details, Status Badge, Current Plan & License Expiry, Tenant ID (e.g. <code>mohan-421dd538</code>), Date Joined, and Action Controls.</li>
+  </ul>
+
+  <h3>Subscription & License Lifecycle Management (<span class="code-pill">SubscriptionModal</span>)</h3>
+  <div class="feature-card">
+    <h4 style="margin-top: 0; color: #4338ca;">Single "Standard Plan" Philosophy</h4>
+    <p style="font-size: 9.5pt;">
+      PrintFlow employs a streamlined <strong>Standard Plan (All Features Included)</strong> model. Instead of complex, confusing tiered feature gates, all print shops receive full access to all features (POS, Production Kanban, Accounting, Inventory, WhatsApp integration). Monetization is strictly driven by <strong>License Duration</strong>:
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Billing Duration</th>
+          <th>Effective License Period</th>
+          <th>Typical Use Case</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Monthly</strong></td>
+          <td>30 Days</td>
+          <td>Standard recurring subscription for local print shops.</td>
+        </tr>
+        <tr>
+          <td><strong>Quarterly</strong></td>
+          <td>90 Days</td>
+          <td>Seasonal printing contracts (e.g., election or festival seasons).</td>
+        </tr>
+        <tr>
+          <td><strong>Yearly</strong></td>
+          <td>365 Days</td>
+          <td>Annual licensed enterprise printing presses.</td>
+        </tr>
+        <tr>
+          <td><strong>Lifetime</strong></td>
+          <td>Unlimited (10 Years / Indefinite)</td>
+          <td>Company-owned flagship branches (e.g., Print Ghar Main Bagbazar).</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>License States & The "Read-Only Order Lock" Guard</h3>
+  <div class="feature-card">
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
+      <div style="background: #ecfdf5; border: 1px solid #a7f3d0; padding: 8px; border-radius: 8px;">
+        <span class="badge badge-emerald">ACTIVE</span>
+        <p style="font-size: 8pt; margin: 4px 0 0 0;">More than 7 days remaining. Full unrestricted access across all portals.</p>
+      </div>
+      <div style="background: #fffbeb; border: 1px solid #fde68a; padding: 8px; border-radius: 8px;">
+        <span class="badge badge-amber">GRACE PERIOD</span>
+        <p style="font-size: 8pt; margin: 4px 0 0 0;">7 or fewer days remaining. Displays non-blocking renewal reminder to store owner.</p>
+      </div>
+      <div style="background: #fff1f2; border: 1px solid #fecdd3; padding: 8px; border-radius: 8px;">
+        <span class="badge badge-rose">EXPIRED</span>
+        <p style="font-size: 8pt; margin: 4px 0 0 0;"><strong>Read-Only Locked.</strong> Can view past orders and print invoices, but <em>cannot book new orders</em>.</p>
+      </div>
+      <div style="background: #f1f5f9; border: 1px solid #cbd5e1; padding: 8px; border-radius: 8px;">
+        <span class="badge badge-slate">SUSPENDED</span>
+        <p style="font-size: 8pt; margin: 4px 0 0 0;">Immediate block. Store owner and staff logins are disabled.</p>
+      </div>
+    </div>
+  </div>
+
+  <h3>Quick Extension Shortcuts</h3>
+  <p>
+    Inside the Subscription Management modal, developers have 4 one-click extension buttons:
+    <span class="code-pill">+30 Days</span>, <span class="code-pill">+90 Days</span>, <span class="code-pill">+1 Year</span>, and <span class="code-pill">Lifetime (10y)</span>. These automatically calculate and advance the expiration date without requiring manual calendar entry.
+  </p>
+
+  <div class="scenario-box">
+    <div class="title">💡 Real-World Situation: Lapsed Shop Renewal & Instant License Extension</div>
+    <strong>Situation:</strong> The owner of "Patan Print House" calls developer support: <em>"Our monthly plan expired yesterday and our reception counter cannot create new customer bills. We just transferred Rs. 3,500 via eSewa for renewal. Please unlock us immediately!"</em><br>
+    <strong>How Developer Works with Example:</strong>
+    <ol style="margin-top: 4px; padding-left: 18px;">
+      <li>Developer opens <strong>SaaS Clients</strong> &rarr; searches <code>Patan</code>.</li>
+      <li>Status indicates: <span class="badge badge-rose">EXPIRED (1d ago) — Read-Only Locked</span>.</li>
+      <li>Developer clicks the <strong>Calendar Icon</strong> (Manage License & Subscription).</li>
+      <li>Developer clicks the shortcut button <span class="code-pill">+30 Days</span>.</li>
+      <li>The expiration date automatically advances 30 days into the future and status flips to <span class="badge badge-emerald">ACTIVE</span>.</li>
+      <li>Developer clicks <strong>Update License</strong>. The client's store is unlocked instantly—no page reloads or database restarts required.</li>
+    </ol>
+  </div>
+
+  <!-- ==================== SUMMARY CHECKLIST ==================== -->
+  <div class="page-break"></div>
+  <h2>8. Developer Console Quick Reference Summary Checklist</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Module Name</th>
+        <th>Primary Developer Action</th>
+        <th>Disaster & Recovery Impact</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>API & Server Status</strong></td>
+        <td>Monitor memory leaks, request rate limits, and inspect Mini-Sentry stack traces.</td>
+        <td>Identifies server memory pressure before Out-Of-Memory (OOM) crashes occur.</td>
+      </tr>
+      <tr>
+        <td><strong>Database / Data</strong></td>
+        <td>Inspect table sizes, execute read-only SQL queries, and download JSON snapshots.</td>
+        <td>Zero-downtime recovery via 7-day rolling automated backups and manual JSON restores.</td>
+      </tr>
+      <tr>
+        <td><strong>Security & Auth</strong></td>
+        <td>Inspect active team sessions, revoke compromised tokens, and enforce rate limits.</td>
+        <td>Instant isolation of compromised employee credentials across all shops.</td>
+      </tr>
+      <tr>
+        <td><strong>System Settings</strong></td>
+        <td>Toggle maintenance mode, configure branding, and manage SMTP email relay.</td>
+        <td>Ensures maintenance upgrades happen safely without corrupted order submissions.</td>
+      </tr>
+      <tr>
+        <td><strong>Support & Announcements</strong></td>
+        <td>Resolve client support tickets and dispatch live announcements to staff.</td>
+        <td>Direct high-speed communication channel between engineering and shop floor staff.</td>
+      </tr>
+      <tr>
+        <td><strong>SaaS Clients</strong></td>
+        <td>Provision new print shops, adjust expiration dates, and enforce Read-Only locks.</td>
+        <td>Full commercial lifecycle management without touching manual database records.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div style="margin-top: 30px; padding: 18px; border-radius: 12px; background: #0f172a; color: #f8fafc; text-align: center;">
+    <h3 style="color: #38bdf8; margin: 0 0 6px 0;">PrintFlow Engineering Command Center</h3>
+    <p style="color: #94a3b8; font-size: 9pt; margin: 0;">
+      PrintFlow SaaS Platform Architecture &bull; Localized for Kathmandu & Nationwide Printing Press Deployments &bull; 2026 Edition
+    </p>
+  </div>
+
+</body>
+</html>

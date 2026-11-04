@@ -143,7 +143,14 @@ CREATE TABLE IF NOT EXISTS orders (
   cancelled_at                TEXT          NOT NULL DEFAULT '',
   cancelled_by                TEXT          NOT NULL DEFAULT '',
   cancel_reason               TEXT          NOT NULL DEFAULT '',
+  mistake_at                  TEXT          NOT NULL DEFAULT '',
+  mistake_cost                NUMERIC(14,2) NOT NULL DEFAULT 0,
+  mistake_reason              TEXT          NOT NULL DEFAULT '',
+  mistake_by                  TEXT          NOT NULL DEFAULT '',
   previous_status             TEXT          NOT NULL DEFAULT '',
+  repeat_of_order_id          TEXT          NOT NULL DEFAULT '',
+  repeat_of_order_number      TEXT          NOT NULL DEFAULT '',
+  repeat_design_mode          TEXT          NOT NULL DEFAULT '',
   created_at                  TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
   updated_at                  TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
@@ -180,6 +187,8 @@ CREATE TABLE IF NOT EXISTS expenses (
   stock_quantity      NUMERIC(14,4),
   date                TEXT          NOT NULL,
   notes               TEXT          NOT NULL DEFAULT '',
+  linked_order_id     TEXT          NOT NULL DEFAULT '',
+  mistake_expense     BOOLEAN       NOT NULL DEFAULT false,
   created_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
   updated_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
@@ -526,3 +535,13 @@ CREATE INDEX IF NOT EXISTS idx_saas_clients_status_created ON saas_clients(statu
 CREATE INDEX IF NOT EXISTS idx_saas_tickets_status_created ON saas_support_tickets(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_saas_audit_biz_created ON saas_audit_logs(client_company, created_at DESC);
 
+
+-- Server-side job / invoice number counters (one row per business and kind).
+-- Allocation locks the row inside the order / invoice transaction; see services/numberingService.js.
+CREATE TABLE IF NOT EXISTS number_counters (
+  business_id TEXT        NOT NULL,
+  kind        TEXT        NOT NULL CHECK (kind IN ('job', 'invoice')),
+  last_value  BIGINT      NOT NULL DEFAULT 0,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (business_id, kind)
+);

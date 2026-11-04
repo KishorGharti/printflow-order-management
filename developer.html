@@ -4,10 +4,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PrintFlow — Developer Admin Console</title>
-  <meta name="description" content="Exclusive platform developer and SaaS owner administration dashboard for PrintFlow." />
+  <title>PrintFlow | Developer Admin Console</title>
+  <meta name="description" content="Platform administration console for PrintFlow: client accounts, subscriptions, server status, backups and support." />
+  <meta name="robots" content="noindex,nofollow" />
   <link rel="icon" type="image/svg+xml"
-    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230f172a'/%3E%3Cpath d='M20 22l-8 10 8 10M44 22l8 10-8 10M36 16l-8 32' fill='none' stroke='%2338bdf8' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%231f2328'/%3E%3Cpath d='M32 10c9 12.5 16 20.5 16 30.5a16 16 0 0 1-32 0C16 30.5 23 22.5 32 10z' fill='white'/%3E%3C/svg%3E" />
 
   <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -109,13 +110,58 @@
       box-shadow: 0 0 12px rgba(56, 189, 248, 0.35);
     }
   </style>
+  <style id="printflow-refinement">
+    /* Visual refinement layer for the Developer Console (presentation only). */
+    .badge-glow { box-shadow: none; }
+
+    /* Modest radii; real circles (avatars, status dots) keep rounded-full on non-buttons */
+    .rounded-3xl { border-radius: 12px !important; }
+    .rounded-2xl { border-radius: 10px !important; }
+    button.rounded-full,
+    a.rounded-full,
+    button.rounded-2xl,
+    button.rounded-3xl,
+    button.rounded-xl { border-radius: 8px !important; }
+
+    /* Decorative gradients become solid */
+    [class*="bg-gradient-to-"] { background-image: none !important; }
+    [class*="bg-gradient-to-"].from-indigo-500,
+    [class*="bg-gradient-to-"].from-indigo-600 { background-color: #4f46e5 !important; }
+
+    /* No coloured glow shadows */
+    [class*="shadow-indigo-"],
+    [class*="shadow-sky-"],
+    [class*="shadow-emerald-"],
+    [class*="shadow-rose-"],
+    [class*="shadow-amber-"] {
+      --tw-shadow-color: rgba(15, 23, 42, 0.08) !important;
+    }
+
+    /* Blur only behind modal overlays */
+    [class*="backdrop-blur"]:not(.fixed) {
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+
+    /* Status badges stay visible without blinking */
+    span.animate-pulse { animation: none !important; }
+
+    button:focus-visible,
+    a:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible {
+      outline: 2px solid #4f46e5;
+      outline-offset: 2px;
+    }
+  </style>
 </head>
 
 <body class="bg-slate-50 text-slate-900 h-full overflow-hidden">
   <!-- React Root Container -->
   <div id="developer-root">
     <!-- Initial Skeleton Loader before React mounts -->
-    <div class="min-h-screen flex items-center justify-center bg-slate-900 text-white">
+    <div id="developer-boot-splash" class="min-h-screen flex items-center justify-center bg-slate-900 text-white">
       <div class="text-center p-8">
         <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600 mb-4 shadow-xl shadow-indigo-500/20 animate-pulse">
           <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -139,7 +185,9 @@
     // Fail-safe if script loading stalls
     window.setTimeout(function () {
       var root = document.getElementById('developer-root');
-      if (root && root.querySelector('.animate-pulse')) {
+      // Only the loading splash means the app never started. (Pulsing dots inside the running
+      // console, e.g. "Online Now" or "Maintenance Mode ON", must not trigger this.)
+      if (root && root.querySelector('#developer-boot-splash')) {
         root.innerHTML = '<div class="min-h-screen flex items-center justify-center bg-slate-900 text-white p-6"><div class="max-w-md bg-slate-800 border border-slate-700 rounded-2xl p-6 text-center"><h3 class="text-lg font-bold text-rose-400 mb-2">Connection Timeout</h3><p class="text-sm text-slate-300 mb-4">Could not load developer console dependencies. Please check network connection and try again.</p><button onclick="location.reload()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 font-semibold rounded-lg text-sm text-white">Reload</button></div></div>';
       }
     }, 7000);

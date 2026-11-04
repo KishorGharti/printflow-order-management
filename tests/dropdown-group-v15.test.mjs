@@ -23,13 +23,13 @@ test('V15 searchable selection supports disabled invalid options', () => {
 test('V15 Group Item checkbox lives beside Product Composer and conditionally reveals breakdown', () => {
   assert.match(app, /Product Composer/);
   assert.match(app, /"Group Item"/);
-  assert.match(app, /newOrderFileBreakdownEnabled && h\("div", \{ className:"rounded-2xl border border-sky-200/);
-  assert.match(app, /if\(enabled\)setIsKnowAfterDesign\(false\)/);
+  assert.match(app, /newOrderFileBreakdownEnabled && h\("div", \{ className:\s*"rounded-2xl border border-sky-200/);
+  assert.match(app, /if\s*\(enabled\)\s*setIsKnowAfterDesign\(false\)/);
 });
 
 test('grouped document billing expands each design into its own row', () => {
   assert.match(app, /const expandGroupedItemsForDocuments/);
-  assert.match(app, /productName:`\$\{row\.name\} \(\$\{parentName\}\)`/);
+  assert.match(app, /productName:\s*`\$\{row\.name\} \(\$\{parentName\}\)`/);
   const billStart = app.indexOf('const createReferenceBillPdf');
   const chalanStart = app.indexOf('const createReferenceChalanPdf');
   const bill = app.slice(billStart, chalanStart);

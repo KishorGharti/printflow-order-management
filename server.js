@@ -13,6 +13,7 @@ const WHATSAPP_API_VERSION = process.env.WHATSAPP_API_VERSION || 'v23.0';
 const JSON_BODY_LIMIT = 64 * 1024;
 const PDF_BODY_LIMIT = 8 * 1024 * 1024;
 const WHATSAPP_TIMEOUT_MS = 15000;
+const BACKEND_PORT = process.env.BACKEND_PORT || 3001;
 
 const MIME_TYPES = {
   '.html': 'text/html',
@@ -232,14 +233,50 @@ async function handleWhatsAppDocument(req, res) {
   }
 }
 
+// The address the backend uses for rate limits and lockouts. A browser can send any
+// X-Forwarded-For it likes, so it is replaced with the real connection address. Only when this
+// server itself sits behind another proxy (e.g. nginx) set TRUST_PROXY=1 to use that proxy's entry.
+function clientAddress(req) {
+  if (process.env.TRUST_PROXY === '1') {
+    const last = String(req.headers['x-forwarded-for'] || '').split(',').map((part) => part.trim()).filter(Boolean).pop();
+    if (last) return last;
+  }
+  return req.socket.remoteAddress || '';
+}
+
+// The WhatsApp relay sends from the shop's WhatsApp account, so only a signed-in user may use it.
+// The backend checks the same login token the app already sends with every /api request.
+function isSignedIn(req) {
+  const authorization = req.headers.authorization || '';
+  const authToken = req.headers['x-auth-token'] || '';
+  if (!authorization && !authToken) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const check = http.request({
+      hostname: '127.0.0.1',
+      port: BACKEND_PORT,
+      path: '/api/auth/me',
+      method: 'GET',
+      headers: {
+        ...(authorization ? { authorization } : {}),
+        ...(authToken ? { 'x-auth-token': authToken } : {}),
+        'x-forwarded-for': clientAddress(req),
+      },
+      timeout: 5000,
+    }, (checkRes) => { checkRes.resume(); resolve(checkRes.statusCode === 200); });
+    check.on('timeout', () => check.destroy());
+    check.on('error', () => resolve(false));
+    check.end();
+  });
+}
+
 function proxyToBackend(req, res) {
-  const backendPort = process.env.BACKEND_PORT || 3001;
+  const backendPort = BACKEND_PORT;
   const options = {
     hostname: '127.0.0.1',
     port: backendPort,
     path: req.url,
     method: req.method,
-    headers: { ...req.headers, host: `127.0.0.1:${backendPort}` },
+    headers: { ...req.headers, host: `127.0.0.1:${backendPort}`, 'x-forwarded-for': clientAddress(req) },
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
@@ -261,11 +298,11 @@ function proxyToBackend(req, res) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-  if (req.method === 'POST' && url.pathname === '/api/whatsapp') {
-    return handleWhatsApp(req, res);
-  }
-  if (req.method === 'POST' && url.pathname === '/api/whatsapp/document') {
-    return handleWhatsAppDocument(req, res);
+  if (req.method === 'POST' && (url.pathname === '/api/whatsapp' || url.pathname === '/api/whatsapp/document')) {
+    if (!(await isSignedIn(req))) {
+      return sendJson(res, 401, { ok: false, error: 'Please sign in to send WhatsApp messages.' });
+    }
+    return url.pathname === '/api/whatsapp' ? handleWhatsApp(req, res) : handleWhatsAppDocument(req, res);
   }
 
   // Forward all other API requests & health checks to Express backend (Port 3001)

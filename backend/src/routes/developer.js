@@ -65,11 +65,14 @@ router.post('/support/broadcast', developerController.broadcastSystemNotificatio
 // Legacy and Client Management Routes
 router.get('/stats', developerController.getStats);
 router.get('/clients', developerController.getClients);
+router.get('/clients/presence', developerController.getClientPresence);
 router.get('/clients/:id', developerController.getClientById);
 router.post('/clients', developerController.createClient);
 router.put('/clients/:id', developerController.updateClient);
 router.patch('/clients/:id/status', developerController.toggleClientStatus);
 router.post('/clients/:id/reset-password', developerController.resetClientPassword);
+router.post('/clients/:id/unlock-job-numbering', developerController.unlockClientJobNumbering);
+router.post('/clients/:id/unlock-invoice-numbering', developerController.unlockClientInvoiceNumbering);
 router.delete('/clients/:id', developerController.deleteClient);
 // Point 3: Subscription & License Management
 router.patch('/clients/:id/subscription', developerController.updateClientSubscription);

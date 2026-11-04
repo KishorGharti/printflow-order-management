@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+// Developer sign-in comes only from DEVELOPER_EMAIL / DEVELOPER_PASSWORD; use test-only values here.
+process.env.DEVELOPER_EMAIL = 'dev@printghar.com';
+process.env.DEVELOPER_PASSWORD = 'test-only-developer-password';
 const developerController = require('../backend/src/controllers/developerController.js');
 const { requireDeveloperAccess } = require('../backend/src/middleware/rbac.js');
 const { ROLES, ROLE_PERMISSIONS } = require('../backend/src/config/permissions.js');
@@ -55,7 +58,7 @@ test('DEVELOPER ADMIN PANEL (STREAMLINED) — Security, RBAC & Functionality Tes
     assert.match(serverJs, /reqUrl === '\/developer'/);
 
     const devHtml = fs.readFileSync('developer.html', 'utf8');
-    assert.match(devHtml, /PrintFlow — Developer Admin Console/);
+    assert.match(devHtml, /PrintFlow \| Developer Admin Console/);
     assert.match(devHtml, /dist\/developer\.js/);
     assert.match(devHtml, /developer-root/);
     assert.match(devHtml, /html,\s*body,\s*#developer-root/);
@@ -112,7 +115,7 @@ test('DEVELOPER ADMIN PANEL (STREAMLINED) — Security, RBAC & Functionality Tes
     const req = createMockReq({
       body: {
         email: 'dev@printghar.com',
-        password: process.env.DEVELOPER_PASSWORD || 'printghar-dev-2026',
+        password: process.env.DEVELOPER_PASSWORD,
       },
     });
     const res = createMockRes();

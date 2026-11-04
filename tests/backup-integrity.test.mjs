@@ -99,10 +99,13 @@ test('5. Backup from business A cannot be restored into business B (even with bu
   assert.equal((await runVerify(otherOwner, payload)).body.code, 'BACKUP_TAMPERED');
 });
 
-test('6. Only the Owner can restore; Reception can download but not restore', async () => {
+test('6. Owner and Reception can restore; Designer and Printer cannot', async () => {
   const payload = await signed(reception);
-  const res = await runVerify(reception, payload);
-  assert.equal(res.statusCode, 403);
-  assert.equal(res.body.code, 'RESTORE_OWNER_ONLY');
+  assert.equal((await runVerify(reception, payload)).body.valid, true);
   assert.equal((await runVerify(owner, payload)).body.valid, true);
+  for (const role of ['designer', 'printer_finishing']) {
+    const res = await runVerify({ ...reception, id: `u-${role}`, role }, payload);
+    assert.equal(res.statusCode, 403, role);
+    assert.equal(res.body.code, 'RESTORE_NOT_ALLOWED');
+  }
 });

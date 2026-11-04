@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { pool } = require('../config/db');
 const { env } = require('../config/env');
 const { verifyToken } = require('../utils/authHelper');
@@ -26,6 +27,11 @@ const failedAttemptsMap = new Map();
 
 // Pending MFA sessions: sessionId -> { code: string, email: string, expiresAt: number }
 const pendingMfaMap = new Map();
+
+// Sign-in style endpoints (login, codes, password reset) get a much lower per-IP limit.
+const AUTH_RATE_LIMIT_PER_MINUTE = 30;
+const authRateLimitMap = new Map();
+const MAX_MFA_GUESSES = 5;
 
 // IP sliding window rate limit tracking: ip -> { count: number, resetAt: number }
 const ipRateLimitMap = new Map();
@@ -191,12 +197,16 @@ function clearAllLockouts() {
  * Extracts and normalizes client IP from request
  */
 function getClientIp(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (forwarded) {
-    const first = forwarded.split(',')[0].trim();
-    if (first) return normalizeIp(first);
+  // Anyone can type an X-Forwarded-For header, so it is only believed when the request comes
+  // straight from this machine: the Print Ghar front server, which sets it from the real
+  // connection. The last entry is the one that server added.
+  const peer = normalizeIp(req.socket?.remoteAddress || req.connection?.remoteAddress || req.ip || '127.0.0.1');
+  const forwarded = req.headers?.['x-forwarded-for'];
+  if (forwarded && peer === '127.0.0.1') {
+    const last = String(forwarded).split(',').map((part) => part.trim()).filter(Boolean).pop();
+    if (last) return normalizeIp(last);
   }
-  return normalizeIp(req.ip || req.connection?.remoteAddress || '127.0.0.1');
+  return peer;
 }
 
 function normalizeIp(ip) {
@@ -253,9 +263,10 @@ function checkIpWhitelistSync(req) {
  * Creates a pending 6-digit MFA session for Developer login
  */
 function createMfaSession(email) {
-  const sessionId = 'mfa_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  const sessionId = 'mfa_' + crypto.randomBytes(16).toString('hex');
+  const otp = String(crypto.randomInt(100000, 1000000));
   pendingMfaMap.set(sessionId, {
+    attempts: 0,
     code: otp,
     email: email.toLowerCase().trim(),
     expiresAt: Date.now() + (10 * 60 * 1000), // 10 minutes
@@ -277,6 +288,11 @@ function verifyMfaSession(sessionId, inputCode) {
   }
 
   if (String(session.code).trim() !== String(inputCode).trim()) {
+    session.attempts = (session.attempts || 0) + 1;
+    if (session.attempts >= MAX_MFA_GUESSES) {
+      pendingMfaMap.delete(sessionId);
+      return { valid: false, error: 'Too many wrong codes. Please log in again to get a new code.' };
+    }
     return { valid: false, error: 'Invalid 6-digit verification code.' };
   }
 
@@ -287,9 +303,43 @@ function verifyMfaSession(sessionId, inputCode) {
 /**
  * Express middleware enforcing the dynamic API rate limit defined in the security policy
  */
+function isAuthEndpoint(req) {
+  if (req.method !== 'POST') return false;
+  return (req.path.startsWith('/api/auth/') && req.path !== '/api/auth/change-password')
+    || req.path.startsWith('/api/developer/auth/');
+}
+
+function isPublicDeveloperEndpoint(req) {
+  return req.path.startsWith('/api/developer/auth/')
+    || req.path.startsWith('/api/developer/errors/report')
+    || req.path.startsWith('/api/developer/report-error');
+}
+
 async function dynamicRateLimiter(req, res, next) {
-  // Exclude health check and developer console administrative endpoints
-  if (req.path === '/health' || req.path.startsWith('/api/developer')) {
+  if (isAuthEndpoint(req)) {
+    const ip = getClientIp(req);
+    const now = Date.now();
+    let record = authRateLimitMap.get(ip);
+    if (!record || record.resetAt <= now) {
+      record = { count: 0, resetAt: now + 60000 };
+      authRateLimitMap.set(ip, record);
+    }
+    record.count += 1;
+    if (record.count > AUTH_RATE_LIMIT_PER_MINUTE) {
+      const retryAfter = Math.max(1, Math.ceil((record.resetAt - now) / 1000));
+      res.setHeader('Retry-After', retryAfter);
+      return res.status(429).json({
+        ok: false,
+        error: 'Too many sign-in attempts from this network. Please wait a minute and try again.',
+        code: 'RATE_LIMIT_EXCEEDED',
+        retryAfterSeconds: retryAfter,
+      });
+    }
+  }
+
+  // Exclude health check and the signed-in developer console (its dashboards poll often).
+  // The developer sign-in and public error-report endpoints are still limited.
+  if (req.path === '/health' || (req.path.startsWith('/api/developer') && !isPublicDeveloperEndpoint(req))) {
     return next();
   }
 

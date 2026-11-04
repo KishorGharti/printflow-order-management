@@ -14,8 +14,11 @@ async function request(path, options = {}) {
     }
   });
   const data = await res.json().catch(() => null);
+  // Remember every order this script creates so cleanup removes exactly those rows.
+  if (path === '/orders' && options.method === 'POST' && data && (data._id || data.id)) createdOrderIds.push(data._id || data.id);
   return { status: res.status, ok: res.ok, data };
 }
+const createdOrderIds = [];
 
 async function runDeadOrderTests() {
   console.log('🧪 Starting Dead Order & Financial Settings Test Suite...\n');
@@ -95,7 +98,7 @@ async function runDeadOrderTests() {
   console.log('✅ PASS: Financial Settings tab and Cancelled (Dead) badge verified in dist/app.js.');
 
   // Clean up
-  await pool.query(`DELETE FROM orders WHERE order_number = $1`, [orderNum]);
+  if (createdOrderIds.length) await pool.query('DELETE FROM orders WHERE id = ANY($1::uuid[])', [createdOrderIds]);
   await pool.end();
 
   console.log('\n========================================');

@@ -2,13 +2,31 @@
 
 const { pool } = require('../config/db');
 const { env } = require('../config/env');
-const { signToken, hashPassword } = require('../utils/authHelper');
+const crypto = require('crypto');
+const { signToken, hashPassword, safeEqual } = require('../utils/authHelper');
+const { sendDeveloperMfaCode } = require('../services/emailService');
 const { ROLES, ROLE_PERMISSIONS } = require('../config/permissions');
 const { invalidateGlobalRevokedCache } = require('../middleware/rbac');
 const logger = require('../utils/logger');
 const systemMonitor = require('../utils/systemMonitor');
 const { createWorkNotification } = require('../services/notificationService');
 const crashReporter = require('../utils/crashReporter');
+const presence = require('../services/presenceService');
+const { setNumberingLocked } = require('./settingsController');
+const { numberingFormat } = require('../services/numberingService');
+
+// 'global_settings' is the column default for unlinked clients, so it only counts as a
+// client's business when that client owns the main business.
+async function getMainBusinessOwnerEmail() {
+  const mainBiz = await pool.query("SELECT email FROM businesses WHERE business_id = 'global_settings' LIMIT 1");
+  return String(mainBiz.rows[0]?.email || '').toLowerCase();
+}
+
+function resolveClientBusinessId(client, mainOwnerEmail) {
+  if (client.business_id && client.business_id !== 'global_settings') return client.business_id;
+  const ownsMainBiz = mainOwnerEmail && String(client.email || '').toLowerCase() === mainOwnerEmail;
+  return ownsMainBiz ? 'global_settings' : null;
+}
 const backupScheduler = require('../services/backupScheduler');
 const {
   getSecurityPolicy,
@@ -61,7 +79,7 @@ async function developerLogin(req, res) {
     const clientIp = getClientIp(req);
 
     // Direct Master API Key auth
-    if (apiKey && env.API_SECRET_KEY && apiKey === env.API_SECRET_KEY) {
+    if (apiKey && env.API_SECRET_KEY && safeEqual(apiKey, env.API_SECRET_KEY)) {
       const token = signToken({
         id: 'dev-master-admin',
         name: 'Platform Developer (Super Admin)',
@@ -103,18 +121,19 @@ async function developerLogin(req, res) {
       });
     }
 
-    const allowedEmails = ['dev@printghar.com', 'admin@printghar.com', 'developer@printghar.com', 'owner@printghar.com'];
-    const isAllowedEmail = allowedEmails.includes(normalizedEmail) || normalizedEmail.endsWith('@printghar.com');
+    // Only the developer account set in backend/.env can sign in. There are no built-in passwords.
+    const configuredEmail = String(process.env.DEVELOPER_EMAIL || '').trim().toLowerCase();
+    const configuredPassword = String(process.env.DEVELOPER_PASSWORD || '');
+    if (!configuredEmail || !configuredPassword) {
+      return res.status(503).json({
+        error: 'Developer sign-in is not set up. Add DEVELOPER_EMAIL and DEVELOPER_PASSWORD to backend/.env and restart the server.',
+        code: 'DEVELOPER_LOGIN_NOT_CONFIGURED',
+      });
+    }
+    const emailMatches = safeEqual(normalizedEmail, configuredEmail);
+    const passwordMatches = safeEqual(password, configuredPassword);
 
-    const expectedPassword = process.env.DEVELOPER_PASSWORD || 'printghar-dev-2026';
-    const isValidPassword =
-      password === expectedPassword ||
-      password === 'printghar-dev-2026' ||
-      password === 'admin123' ||
-      password === 'printghar-secret-2026' ||
-      (env.API_SECRET_KEY && password === env.API_SECRET_KEY);
-
-    if (!isAllowedEmail || !isValidPassword) {
+    if (!emailMatches || !passwordMatches) {
       const lockRes = await recordFailedLogin(normalizedEmail, clientIp);
       await logAudit(req, {
         action: 'Failed Developer Login Attempt',
@@ -133,14 +152,20 @@ async function developerLogin(req, res) {
     // 3. Multi-Factor Authentication check
     const policy = await getSecurityPolicy();
     if (policy.enforce_mfa_developer) {
+      // The code goes only to the developer's email. It is never returned or written to the log.
       const { sessionId, otp } = createMfaSession(normalizedEmail);
-      logger.info(`🔐 Developer MFA generated for ${normalizedEmail}: 6-digit code is ${otp}`);
+      try {
+        await sendDeveloperMfaCode(configuredEmail, otp);
+      } catch (mailErr) {
+        logger.error(`Failed to send developer MFA email: ${mailErr.message}`);
+        return res.status(500).json({ ok: false, error: 'Could not send the verification code by email. Please check the email settings and try again.' });
+      }
+      logger.info(`🔐 Developer MFA code sent to ${configuredEmail}`);
       return res.json({
         ok: true,
         requiresMfa: true,
         sessionId,
-        message: 'Developer Multi-Factor Authentication is active. Enter the 6-digit verification code.',
-        devOtp: otp,
+        message: 'A 6-digit verification code has been sent to the developer email. Enter it to continue.',
       });
     }
 
@@ -338,7 +363,7 @@ async function getClients(req, res) {
       SELECT
         c.id, c.name, c.email, c.phone, c.status, c.notes,
         c.subscription_plan, c.subscription_expires_at, c.subscription_status, c.plan_duration,
-        c.last_login_at, c.created_at, c.updated_at
+        c.last_login_at, c.created_at, c.updated_at, c.business_id
       FROM saas_clients c
       ${baseWhere}
       ORDER BY c.created_at DESC
@@ -346,7 +371,14 @@ async function getClients(req, res) {
     `;
     const queryParams = [...params, limit, offset];
 
-    const { rows } = await pool.query(query, queryParams);
+    const [{ rows }, numberingRes, mainOwnerEmail] = await Promise.all([
+      pool.query(query, queryParams),
+      pool.query("SELECT business_id, key, value FROM developer_settings WHERE key IN ('job_numbering', 'invoice_numbering')"),
+      getMainBusinessOwnerEmail(),
+    ]);
+    const lockedJob = new Set(numberingRes.rows.filter(r => r.key === 'job_numbering' && r.value?.locked === true).map(r => r.business_id));
+    const lockedInvoice = new Set(numberingRes.rows.filter(r => r.key === 'invoice_numbering' && r.value?.locked === true).map(r => r.business_id));
+    const numberingByBusiness = await getNumberingOverview(rows.map(r => resolveClientBusinessId(r, mainOwnerEmail)).filter(Boolean));
     const now = Date.now();
     const clientsWithSub = rows.map(r => {
       const expMs = r.subscription_expires_at ? new Date(r.subscription_expires_at).getTime() : null;
@@ -360,13 +392,138 @@ async function getClients(req, res) {
         subscription_status: isExpired ? 'expired' : (isGrace ? 'grace_period' : r.subscription_status || 'active'),
         days_remaining: isExpired && daysRemaining > 0 ? 0 : daysRemaining,
         is_expired: isExpired,
-        is_grace_period: isGrace
+        is_grace_period: isGrace,
+        job_numbering_locked: lockedJob.has(resolveClientBusinessId(r, mainOwnerEmail)),
+        invoice_numbering_locked: lockedInvoice.has(resolveClientBusinessId(r, mainOwnerEmail)),
+        numbering: numberingByBusiness.get(resolveClientBusinessId(r, mainOwnerEmail)) || null,
       };
     });
     return res.json({ ok: true, clients: clientsWithSub, total, page, limit, totalPages });
   } catch (err) {
     logger.error('Failed to get clients:', err);
     res.status(500).json({ error: 'Failed to fetch clients list.' });
+  }
+}
+
+/**
+ * Where each shop's numbering starts (job prefix, job starting number, invoice starting number)
+ * and the next numbers it will get, computed the same way the server allocates them. Read-only.
+ */
+async function getNumberingOverview(businessIds) {
+  const ids = [...new Set(businessIds)];
+  const overview = new Map();
+  if (!ids.length) return overview;
+  const [settingsRes, usedRes, countersRes] = await Promise.all([
+    pool.query('SELECT key, job_prefix, job_start_number, invoice_prefix, invoice_start_number FROM settings WHERE key = ANY($1::text[])', [ids]),
+    pool.query(
+      `SELECT business_id,
+              COALESCE(MAX(substring(order_number from '([0-9]{1,15})$')::bigint), 0) AS job_used,
+              COALESCE(MAX(substring(invoice_number from '([0-9]{1,15})$')::bigint), 0) AS invoice_used
+       FROM orders WHERE business_id = ANY($1::text[]) GROUP BY business_id`,
+      [ids]
+    ),
+    pool.query('SELECT business_id, kind, last_value FROM number_counters WHERE business_id = ANY($1::text[])', [ids]).catch(() => ({ rows: [] })),
+  ]);
+  const settings = new Map(settingsRes.rows.map(r => [r.key, r]));
+  const used = new Map(usedRes.rows.map(r => [r.business_id, r]));
+  const counters = new Map(countersRes.rows.map(r => [`${r.business_id}|${r.kind}`, Number(r.last_value || 0)]));
+  for (const id of ids) {
+    const job = numberingFormat(settings.get(id), 'job');
+    const invoice = numberingFormat(settings.get(id), 'invoice');
+    const jobUsed = Math.max(Number(used.get(id)?.job_used || 0), counters.get(`${id}|job`) || 0);
+    const invoiceUsed = Math.max(Number(used.get(id)?.invoice_used || 0), counters.get(`${id}|invoice`) || 0);
+    overview.set(id, {
+      jobPrefix: job.prefix,
+      jobStartNumber: job.start,
+      invoiceStartNumber: invoice.start,
+      nextJobNumber: `${job.prefix}${Math.max(jobUsed, job.start - 1) + 1}`,
+      nextInvoiceNumber: `${invoice.prefix}${Math.max(invoiceUsed, invoice.start - 1) + 1}`,
+    });
+  }
+  return overview;
+}
+
+/**
+ * GET /api/developer/clients/presence
+ * Online / offline status for every client shop (owner or staff active in the last 5 minutes).
+ */
+async function getClientPresence(req, res) {
+  try {
+    const { rows } = await pool.query('SELECT id, email, business_id FROM saas_clients');
+    const mainOwnerEmail = await getMainBusinessOwnerEmail();
+
+    const now = Date.now();
+    const clients = {};
+    let online = 0;
+    for (const r of rows) {
+      const lastSeenAt = presence.getLastSeen(r.id, resolveClientBusinessId(r, mainOwnerEmail));
+      const isOnline = presence.isOnline(lastSeenAt, now);
+      if (isOnline) online++;
+      clients[r.id] = { isOnline, lastSeenAt: lastSeenAt ? new Date(lastSeenAt).toISOString() : null };
+    }
+
+    return res.json({
+      ok: true,
+      total: rows.length,
+      online,
+      offline: rows.length - online,
+      onlineWindowMinutes: presence.ONLINE_WINDOW_MS / 60000,
+      clients,
+    });
+  } catch (err) {
+    logger.error('Failed to get client presence:', err);
+    res.status(500).json({ error: 'Failed to fetch client online status.' });
+  }
+}
+
+/**
+ * POST /api/developer/clients/:id/unlock-job-numbering
+ * POST /api/developer/clients/:id/unlock-invoice-numbering
+ * Lets the client's shop set its job prefix + job starting number (or its invoice starting number)
+ * one more time. The lock turns back on automatically after the shop saves.
+ */
+const NUMBERING_UNLOCK = {
+  job: { label: 'Job Numbering', what: 'the job prefix and starting number', flag: 'jobNumberingLocked' },
+  invoice: { label: 'Invoice Numbering', what: 'the invoice starting number', flag: 'invoiceNumberingLocked' },
+};
+
+const unlockClientJobNumbering = (req, res) => unlockClientNumbering(req, res, 'job');
+const unlockClientInvoiceNumbering = (req, res) => unlockClientNumbering(req, res, 'invoice');
+
+async function unlockClientNumbering(req, res, kind) {
+  const info = NUMBERING_UNLOCK[kind];
+  try {
+    const { id } = req.params;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      return res.status(400).json({ error: 'Invalid client ID.' });
+    }
+    const { rows } = await pool.query('SELECT id, name, email, business_id FROM saas_clients WHERE id = $1', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Client not found.' });
+
+    const client = rows[0];
+    const businessId = resolveClientBusinessId(client, await getMainBusinessOwnerEmail());
+    if (!businessId) {
+      return res.status(400).json({ error: `This client has not set up a business yet, so there is no ${info.label.toLowerCase()} to unlock.` });
+    }
+
+    await setNumberingLocked(businessId, kind, false);
+    await logAudit(req, {
+      action: `${info.label} Unlocked`,
+      clientCompany: businessId,
+      targetType: 'business_settings',
+      targetId: businessId,
+      details: { clientId: client.id, clientEmail: client.email },
+    });
+
+    return res.json({
+      ok: true,
+      businessId,
+      [info.flag]: false,
+      message: `${client.name} can now set ${info.what} one more time.`,
+    });
+  } catch (err) {
+    logger.error(`Failed to unlock ${info.label.toLowerCase()}:`, err);
+    res.status(500).json({ error: `Failed to unlock ${info.label.toLowerCase()}.` });
   }
 }
 
@@ -576,7 +733,7 @@ async function resetClientPassword(req, res) {
     }
 
     const client = clientRes.rows[0];
-    const generatedPassword = newPassword || `PG-${Math.floor(100000 + Math.random() * 900000)}`;
+    const generatedPassword = newPassword || `PG-${crypto.randomInt(100000, 1000000)}`;
 
     const hashedPassword = hashPassword(generatedPassword);
     await pool.query(
@@ -2175,6 +2332,9 @@ module.exports = {
 
   // Clients
   getClients,
+  getClientPresence,
+  unlockClientJobNumbering,
+  unlockClientInvoiceNumbering,
   getClientById,
   createClient,
   updateClient,

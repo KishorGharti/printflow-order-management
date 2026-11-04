@@ -44,9 +44,10 @@ function stripIntegrity(payload) {
   return { rest, integrity };
 }
 
-function isOwnerLike(user) {
+// Owner and Reception may restore a backup; Designer and Printer may not.
+function canRestoreBackup(user) {
   const roles = String(user?.role || '').split(',').map(r => r.trim().toLowerCase());
-  return roles.includes('owner') || roles.includes('super_admin') || roles.includes('developer') || user?.isClient === true;
+  return roles.includes('owner') || roles.includes('reception') || roles.includes('super_admin') || roles.includes('developer') || user?.isClient === true;
 }
 
 async function audit(req, action, details) {
@@ -94,12 +95,12 @@ const sign = async (req, res, next) => {
   }
 };
 
-/** POST /api/backup/verify — body: { payload } → { valid: true } or 4xx with reason. Owner only. */
+/** POST /api/backup/verify — body: { payload } → { valid: true } or 4xx with reason. Owner or Reception. */
 const verify = async (req, res, next) => {
   try {
-    if (!isOwnerLike(req.user)) {
-      await audit(req, 'Backup Restore Denied (Not Owner)', {});
-      return res.status(403).json({ error: 'Only the business Owner can restore a backup.', code: 'RESTORE_OWNER_ONLY' });
+    if (!canRestoreBackup(req.user)) {
+      await audit(req, 'Backup Restore Denied (Not Owner or Reception)', {});
+      return res.status(403).json({ error: 'Only the Owner or Reception can restore a backup.', code: 'RESTORE_NOT_ALLOWED' });
     }
 
     const payload = req.body && req.body.payload;

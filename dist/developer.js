@@ -19,7 +19,7 @@
       plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
       edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
       trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
-      eye: '<path d="2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+      eye: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
       key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>',
       check: '<polyline points="20 6 9 17 4 12"/>',
       alert: '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>',
@@ -251,6 +251,7 @@
     const [schedulerStatus, setSchedulerStatus] = useState(null);
     const [errorLogs, setErrorLogs] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [activityDataReady, setActivityDataReady] = useState(false);
 
     // Filter states
     const [logFilter, setLogFilter] = useState('errors');
@@ -310,6 +311,7 @@
         addToast('Error loading developer telemetry: ' + err.message, 'error');
       } finally {
         setLoading(false);
+        setActivityDataReady(true);
       }
     }, [token, fetchApi, addToast]);
 
@@ -318,6 +320,113 @@
         loadAllData();
       }
     }, [token, loadAllData]);
+
+    // ─────────────────────────────────────────────────────────
+    // SIDEBAR "NEW" COUNTERS
+    // Counts items added or updated since each tab was last opened.
+    // Last-opened markers are kept in this browser's localStorage.
+    // ─────────────────────────────────────────────────────────
+    const SEEN_STORAGE_KEY = 'printflow_dev_seen_tabs_v1';
+    const [seenAt, setSeenAt] = useState(() => {
+      try {
+        const saved = JSON.parse(localStorage.getItem(SEEN_STORAGE_KEY) || 'null');
+        if (saved && typeof saved === 'object') return saved;
+      } catch (_) {}
+      return {};
+    });
+
+    useEffect(() => {
+      try { localStorage.setItem(SEEN_STORAGE_KEY, JSON.stringify(seenAt)); } catch (_) {}
+    }, [seenAt]);
+
+    const activityTimes = useMemo(() => {
+      const ms = (v) => {
+        const t = v ? new Date(v).getTime() : 0;
+        return Number.isFinite(t) ? t : 0;
+      };
+      return {
+        server: (errorLogs || []).map((e) => ms(e.created_at || e.createdAt)),
+        database: (automatedBackups || []).map((b) => ms(b.createdAt)),
+        security: (securityData?.loginLogs || []).map((l) => ms(l.created_at)),
+        support: (tickets || []).map((t) => Math.max(ms(t.created_at), ms(t.updated_at))),
+        // A client login also bumps updated_at, so a login alone is not counted as an edit.
+        clients: (clients || []).map((c) => {
+          const updated = ms(c.updated_at);
+          const loginOnly = Math.abs(updated - ms(c.last_login_at)) < 5000;
+          return Math.max(ms(c.created_at), loginOnly ? 0 : updated);
+        }),
+        // Sub-tabs inside API & Server Status
+        'log:crashes': (errorLogs || []).map((e) => ms(e.created_at || e.createdAt)),
+        'log:errors': (logsData?.errorLogs || []).map((e) => ms(e.timestamp || e.created_at)),
+        'log:failed': (logsData?.failedRequests || []).map((r) => ms(r.timestamp || r.created_at)),
+        'log:auth': (logsData?.authLogs || []).map((a) => ms(a.created_at || a.timestamp)),
+        'log:activity': (logsData?.recentActivity || []).map((a) => ms(a.created_at || a.timestamp)),
+      };
+    }, [errorLogs, automatedBackups, securityData, tickets, clients, logsData]);
+
+    // Marks tabs as seen up to now, or up to their newest item if the server clock runs ahead.
+    const markTabsSeen = useCallback((tabIds) => {
+      setSeenAt((prev) => {
+        const next = { ...prev };
+        for (const id of tabIds) {
+          const times = activityTimes[id];
+          if (!times) continue;
+          next[id] = times.reduce((max, t) => (t > max ? t : max), Date.now());
+        }
+        return next;
+      });
+    }, [activityTimes]);
+
+    // First use in this browser: treat existing data as already seen.
+    useEffect(() => {
+      if (!activityDataReady) return;
+      const unknown = Object.keys(activityTimes).filter((id) => seenAt[id] === undefined);
+      if (unknown.length) markTabsSeen(unknown);
+    }, [activityDataReady]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // The open tab (and the open log sub-tab) is always seen, including items that arrive while it is open.
+    useEffect(() => {
+      if (!activityDataReady) return;
+      const openIds = [activeTab];
+      if (activeTab === 'server') openIds.push('log:' + logFilter);
+      markTabsSeen(openIds.filter((id) => activityTimes[id]));
+    }, [activeTab, logFilter, activityTimes, activityDataReady, markTabsSeen]);
+
+    const newCounts = useMemo(() => {
+      const out = {};
+      for (const [id, times] of Object.entries(activityTimes)) {
+        const since = seenAt[id];
+        out[id] = since === undefined ? 0 : times.filter((t) => t > since).length;
+      }
+      return out;
+    }, [activityTimes, seenAt]);
+
+    // Light background check for new activity once a minute while the console is visible.
+    useEffect(() => {
+      if (!token) return undefined;
+      const refreshActivity = async () => {
+        if (document.visibilityState !== 'visible') return;
+        const [secRes, tixRes, clientsRes, autoBRes, errRes, logsRes] = await Promise.all([
+          fetchApi('/api/developer/security/overview').catch(() => null),
+          fetchApi('/api/developer/support/tickets').catch(() => null),
+          fetchApi('/api/developer/clients').catch(() => null),
+          fetchApi('/api/developer/database/automated-backups').catch(() => null),
+          fetchApi('/api/developer/errors').catch(() => null),
+          fetchApi('/api/developer/logs').catch(() => null),
+        ]);
+        if (logsRes?.ok) setLogsData(logsRes);
+        if (secRes?.security) setSecurityData(secRes.security);
+        if (tixRes?.tickets) setTickets(tixRes.tickets);
+        if (clientsRes?.clients) setClients(clientsRes.clients);
+        if (autoBRes?.ok) {
+          setAutomatedBackups(autoBRes.backups || []);
+          setSchedulerStatus(autoBRes.scheduler || null);
+        }
+        if (errRes?.ok) setErrorLogs(errRes.errors || []);
+      };
+      const timer = setInterval(refreshActivity, 60000);
+      return () => clearInterval(timer);
+    }, [token, fetchApi]);
 
     // Export Database Backup JSON
     const exportFullBackup = useCallback(async () => {
@@ -364,11 +473,7 @@
           setMfaSession({
             sessionId: data.sessionId,
             email: loginEmail,
-            devOtp: data.devOtp,
           });
-          if (data.devOtp) {
-            setMfaCode(data.devOtp);
-          }
           addToast(data.message || 'MFA required: Enter the 6-digit verification code.', 'info');
           return;
         }
@@ -466,8 +571,7 @@
                   'div',
                   { className: 'p-4 rounded-2xl bg-indigo-950/70 border border-indigo-500/30 text-indigo-200 text-xs text-center space-y-1' },
                   h('p', { className: 'font-black text-indigo-100 text-sm' }, 'Two-Factor Authentication Required'),
-                  h('p', { className: 'text-[11px] text-indigo-300' }, 'Enter the 6-digit verification code generated for ' + mfaSession.email),
-                  mfaSession.devOtp && h('p', { className: 'text-[11px] text-amber-300 font-mono font-bold mt-1' }, 'Developer Code: ' + mfaSession.devOtp)
+                  h('p', { className: 'text-[11px] text-indigo-300' }, 'Enter the 6-digit verification code sent to the developer email.')
                 ),
                 h(
                   'div',
@@ -609,7 +713,7 @@
       { id: 'settings', label: 'System Settings', icon: 'settings' },
       { id: 'support', label: 'Support & Broadcast', icon: 'support', badge: tickets?.filter(t => t.status === 'open').length || 0 },
       { id: 'clients', label: 'SaaS Clients', icon: 'clients', badge: clients?.length || 0 },
-    ];
+    ].map((item) => ({ ...item, newCount: newCounts[item.id] || 0 }));
 
     const isMaintenance = serverStatus?.maintenanceMode?.enabled || false;
 
@@ -686,7 +790,16 @@
                 }),
                 h('span', { className: 'truncate' }, item.label)
               ),
-              item.badge !== undefined && item.badge !== null
+              item.newCount > 0
+                ? h(
+                    'span',
+                    {
+                      className: 'min-w-5 h-5 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-bold shrink-0 flex items-center justify-center',
+                      title: item.newCount + ' new since you last opened this tab',
+                    },
+                    item.newCount > 99 ? '99+' : item.newCount
+                  )
+                : item.badge !== undefined && item.badge !== null
                 ? h(
                     'span',
                     {
@@ -766,7 +879,7 @@
             h('h2', { className: 'text-sm sm:text-base font-black text-slate-900 capitalize truncate' },
               navItems.find((n) => n.id === activeTab)?.label || 'Developer Console'
             ),
-            isMaintenance && h('span', { className: 'px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-200 animate-pulse shrink-0 hidden sm:inline-block' }, '⚠️ Maintenance Mode ON')
+            isMaintenance && h('span', { className: 'px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-200 animate-pulse shrink-0 hidden sm:inline-block' }, 'Maintenance Mode ON')
           ),
           h(
             'div',
@@ -804,6 +917,13 @@
             serverStatus,
             logsData,
             errorLogs,
+            logNewCounts: {
+              crashes: newCounts['log:crashes'] || 0,
+              errors: newCounts['log:errors'] || 0,
+              failed: newCounts['log:failed'] || 0,
+              auth: newCounts['log:auth'] || 0,
+              activity: newCounts['log:activity'] || 0,
+            },
             onInspectError: (err) => setModalInspectError(err),
             onInspectAudit: (log) => setModalInspectAudit(log),
             logFilter,
@@ -957,7 +1077,7 @@
   // ─────────────────────────────────────────────────────────────
   // 1. API / SERVER STATUS & LOGS VIEW
   // ─────────────────────────────────────────────────────────────
-  function ServerStatusView({ serverStatus, logsData, errorLogs, onInspectError, onInspectAudit, logFilter, setLogFilter, logSearch, setLogSearch, loading, reload, fetchApi, addToast }) {
+  function ServerStatusView({ serverStatus, logsData, errorLogs, logNewCounts = {}, onInspectError, onInspectAudit, logFilter, setLogFilter, logSearch, setLogSearch, loading, reload, fetchApi, addToast }) {
     const s = serverStatus?.server;
     const db = serverStatus?.database;
     const rl = serverStatus?.rateLimit;
@@ -1083,7 +1203,12 @@
                   (active ? 'bg-slate-900 text-white shadow-xs' : hasAlert ? 'bg-rose-50 border border-rose-300 text-rose-800 hover:bg-rose-100' : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'),
               },
               h('span', null, tab.label),
-              h('span', { className: 'px-1.5 py-0.5 rounded-md text-[10px] font-mono ' + (active ? 'bg-white/20 text-white' : hasAlert ? 'bg-rose-200 text-rose-900 font-bold' : 'bg-slate-100 text-slate-600') }, tab.count)
+              logNewCounts[tab.id] > 0
+                ? h('span', {
+                    className: 'min-w-5 h-5 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center',
+                    title: logNewCounts[tab.id] + ' new since you last opened this list',
+                  }, logNewCounts[tab.id] > 99 ? '99+' : logNewCounts[tab.id])
+                : h('span', { className: 'px-1.5 py-0.5 rounded-md text-[10px] font-mono ' + (active ? 'bg-white/20 text-white' : hasAlert ? 'bg-rose-200 text-rose-900 font-bold' : 'bg-slate-100 text-slate-600') }, tab.count)
               );
             })
           ),
@@ -1771,7 +1896,7 @@
         ),
         h('div', { className: 'flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs' },
           h('div', { className: 'text-slate-500 text-[11px]' },
-            '🛡️ Only SELECT, EXPLAIN, and WITH statements allowed. Destructive actions are strictly blocked.'
+            'Only SELECT, EXPLAIN, and WITH statements allowed. Destructive actions are strictly blocked.'
           ),
           h('div', { className: 'flex items-center gap-2 shrink-0' },
             result && h('button', {
@@ -2225,7 +2350,7 @@
               h(Icon, { name: 'send', className: 'w-4 h-4 text-indigo-600' }),
               'Broadcast System Notification'
             ),
-            h('p', { className: 'text-xs text-slate-500 mt-0.5' }, 'Dispatch instant maintenance or emergency alerts directly to the top bell icon (🔔) of client apps in real time.')
+            h('p', { className: 'text-xs text-slate-500 mt-0.5' }, 'Dispatch instant maintenance or emergency alerts directly to the top bell icon of client apps in real time.')
           ),
           h('span', { className: 'px-3 py-1 rounded-full text-[11px] font-bold font-mono bg-indigo-50 text-indigo-700 border border-indigo-100 flex items-center gap-1.5' },
             h('span', { className: 'w-2 h-2 rounded-full bg-indigo-600 animate-pulse' }),
@@ -2308,6 +2433,46 @@
       });
     };
 
+    const handleUnlockJobNumbering = (client) => {
+      setConfirmAction({
+        title: 'Unlock Job Numbering: ' + client.name,
+        message: client.name + ' will be able to change the job prefix and job starting number one more time. It locks again automatically after they save.',
+        confirmText: 'Unlock Job Numbering',
+        isDanger: false,
+        onConfirm: async () => {
+          try {
+            const res = await fetchApi('/api/developer/clients/' + client.id + '/unlock-job-numbering', { method: 'POST' });
+            if (res.ok) {
+              addToast(res.message || 'Job numbering unlocked.', 'success');
+              reload();
+            }
+          } catch (err) {
+            addToast(err.message, 'error');
+          }
+        },
+      });
+    };
+
+    const handleUnlockInvoiceNumbering = (client) => {
+      setConfirmAction({
+        title: 'Unlock Invoice Numbering: ' + client.name,
+        message: client.name + ' will be able to change the invoice starting number one more time. It locks again automatically after they save.',
+        confirmText: 'Unlock Invoice Numbering',
+        isDanger: false,
+        onConfirm: async () => {
+          try {
+            const res = await fetchApi('/api/developer/clients/' + client.id + '/unlock-invoice-numbering', { method: 'POST' });
+            if (res.ok) {
+              addToast(res.message || 'Invoice numbering unlocked.', 'success');
+              reload();
+            }
+          } catch (err) {
+            addToast(err.message, 'error');
+          }
+        },
+      });
+    };
+
     const handleDeleteClient = (client) => {
       setConfirmAction({
         title: 'Delete Client Account: ' + client.name,
@@ -2328,6 +2493,28 @@
       });
     };
 
+    // Live online / offline presence (owner or staff active within the server's window), refreshed every 30s.
+    const [presence, setPresence] = useState(null);
+    useEffect(() => {
+      let cancelled = false;
+      const loadPresence = () => fetchApi('/api/developer/clients/presence')
+        .then((data) => { if (!cancelled && data?.ok) setPresence(data); })
+        .catch(() => {});
+      loadPresence();
+      const timer = setInterval(loadPresence, 30000);
+      return () => { cancelled = true; clearInterval(timer); };
+    }, [fetchApi]);
+
+    const presenceFor = (c) => presence?.clients?.[c.id] || null;
+    const formatLastSeen = (iso) => {
+      if (!iso) return 'Not seen since server start';
+      const mins = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+      if (mins < 1) return 'Active just now';
+      if (mins < 60) return 'Last seen ' + mins + ' min ago';
+      const hrs = Math.floor(mins / 60);
+      return 'Last seen ' + hrs + ' hr' + (hrs === 1 ? '' : 's') + ' ago';
+    };
+
     const filteredClients = useMemo(() => {
       const q = (search || '').trim().toLowerCase();
       return (clients || []).filter((c) => {
@@ -2344,7 +2531,10 @@
         }
 
         // 2. Status dropdown filter
-        if (statusFilter && statusFilter !== 'all') {
+        if (statusFilter === 'online' || statusFilter === 'offline') {
+          const isOn = Boolean(presence?.clients?.[c.id]?.isOnline);
+          if (statusFilter === 'online' ? !isOn : isOn) return false;
+        } else if (statusFilter && statusFilter !== 'all') {
           const isExp = Boolean(c.is_expired || c.status === 'expired' || c.subscription_status === 'expired');
           const isDeact = Boolean(c.status === 'deactivated' || c.status === 'suspended' || c.subscription_status === 'suspended');
           const isGrace = Boolean(c.is_grace_period || c.subscription_status === 'grace_period');
@@ -2358,7 +2548,7 @@
 
         return true;
       });
-    }, [clients, search, statusFilter]);
+    }, [clients, search, statusFilter, presence]);
 
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(20);
@@ -2395,7 +2585,9 @@
           h('option', { value: 'active' }, 'Active'),
           h('option', { value: 'expired' }, 'Expired'),
           h('option', { value: 'grace_period' }, 'Grace Period'),
-          h('option', { value: 'deactivated' }, 'Deactivated / Suspended')
+          h('option', { value: 'deactivated' }, 'Deactivated / Suspended'),
+          h('option', { value: 'online' }, 'Online Now'),
+          h('option', { value: 'offline' }, 'Offline')
           )
         ),
         h('button', {
@@ -2404,6 +2596,34 @@
         },
         h(Icon, { name: 'plus', className: 'w-4 h-4' }),
         'Add New Client'
+        )
+      ),
+
+      // Online / Offline summary
+      h('div', { className: 'grid grid-cols-1 sm:grid-cols-3 gap-3' },
+        h('button', {
+          type: 'button',
+          onClick: () => setStatusFilter(statusFilter === 'online' ? 'all' : 'online'),
+          className: 'bg-white rounded-3xl p-5 border shadow-xs text-left cursor-pointer transition ' + (statusFilter === 'online' ? 'border-emerald-400 ring-2 ring-emerald-100' : 'border-slate-200/80 hover:border-emerald-300'),
+        },
+          h('div', { className: 'flex items-center gap-2 text-[10px] uppercase font-bold text-slate-400' },
+            h('span', { className: 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse' }), 'Online Now'),
+          h('div', { className: 'mt-1 text-2xl font-black text-emerald-700' }, presence ? presence.online : '—')
+        ),
+        h('button', {
+          type: 'button',
+          onClick: () => setStatusFilter(statusFilter === 'offline' ? 'all' : 'offline'),
+          className: 'bg-white rounded-3xl p-5 border shadow-xs text-left cursor-pointer transition ' + (statusFilter === 'offline' ? 'border-slate-400 ring-2 ring-slate-100' : 'border-slate-200/80 hover:border-slate-300'),
+        },
+          h('div', { className: 'flex items-center gap-2 text-[10px] uppercase font-bold text-slate-400' },
+            h('span', { className: 'w-2 h-2 rounded-full bg-slate-300' }), 'Offline'),
+          h('div', { className: 'mt-1 text-2xl font-black text-slate-700' }, presence ? presence.offline : '—')
+        ),
+        h('div', { className: 'bg-white rounded-3xl p-5 border border-slate-200/80 shadow-xs' },
+          h('div', { className: 'text-[10px] uppercase font-bold text-slate-400' }, 'Total Clients'),
+          h('div', { className: 'mt-1 text-2xl font-black text-slate-900' }, presence ? presence.total : '—'),
+          h('div', { className: 'mt-1 text-[11px] text-slate-400' },
+            'Online = owner or staff active in the last ' + (presence?.onlineWindowMinutes || 5) + ' min · refreshes every 30s')
         )
       ),
 
@@ -2418,8 +2638,10 @@
                   h('tr', null,
                     h('th', { className: 'px-4 py-3' }, 'Client / Contact'),
                     h('th', { className: 'px-4 py-3' }, 'Status'),
+                    h('th', { className: 'px-4 py-3' }, 'Online'),
                     h('th', { className: 'px-4 py-3' }, 'Plan & License Expiry'),
                     h('th', { className: 'px-4 py-3' }, 'Tenant ID'),
+                    h('th', { className: 'px-4 py-3' }, 'Numbering'),
                     h('th', { className: 'px-4 py-3' }, 'Joined Date'),
                     h('th', { className: 'px-4 py-3 text-right' }, 'Actions')
                   )
@@ -2441,6 +2663,14 @@
                         h('span', { className: 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-100 text-emerald-800' }, 'ACTIVE')
                     ),
                     h('td', { className: 'px-4 py-3' },
+                      presenceFor(c)?.isOnline
+                        ? h('span', { className: 'inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-100 text-emerald-800' },
+                            h('span', { className: 'w-1.5 h-1.5 rounded-full bg-emerald-500' }), 'Online')
+                        : h('span', { className: 'inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-100 text-slate-500' },
+                            h('span', { className: 'w-1.5 h-1.5 rounded-full bg-slate-400' }), 'Offline'),
+                      presence && h('div', { className: 'mt-1 text-[10px] text-slate-400' }, formatLastSeen(presenceFor(c)?.lastSeenAt))
+                    ),
+                    h('td', { className: 'px-4 py-3' },
                       h('div', { className: 'flex items-center gap-1.5' },
                         h('span', { className: 'px-2 py-0.5 rounded text-[10px] font-black bg-indigo-50 text-indigo-700 uppercase' }, c.subscription_plan || 'Standard'),
                         h('span', { className: 'text-[10px] font-semibold text-slate-500' }, c.plan_duration || 'monthly')
@@ -2451,7 +2681,44 @@
                         h('span', { className: 'px-2 py-0.5 rounded text-[10px] font-black bg-emerald-100 text-emerald-800' }, c.days_remaining !== null ? `${c.days_remaining}d left` : 'Lifetime')
                       )
                     ),
-                    h('td', { className: 'px-4 py-3 font-mono text-[11px] text-slate-500' }, c.business_id || 'global_settings'),
+                    h('td', { className: 'px-4 py-3 font-mono text-[11px] text-slate-500' },
+                      h('div', null, c.business_id || 'global_settings')
+                    ),
+                    // Where this shop's numbers start, the next numbers, and each one-time lock.
+                    h('td', { className: 'px-4 py-3 text-[11px] text-slate-600 whitespace-nowrap' },
+                      !c.numbering
+                        ? h('span', { className: 'text-[10px] text-slate-400' }, 'No shop set up yet')
+                        : h('div', { className: 'space-y-1.5' },
+                            h('div', null,
+                              h('div', { className: 'flex items-center gap-1.5' },
+                                h('span', { className: 'font-bold text-slate-700' }, 'Job:'),
+                                h('span', { className: 'font-mono' }, 'prefix ' + c.numbering.jobPrefix + ' · starts ' + c.numbering.jobStartNumber),
+                                c.job_numbering_locked && h('button', {
+                                  onClick: () => handleUnlockJobNumbering(c),
+                                  title: 'Unlock job prefix and starting number',
+                                  'aria-label': 'Unlock job prefix and starting number for ' + c.name,
+                                  className: 'ml-1 px-1.5 py-0.5 rounded border border-amber-200 text-[10px] font-bold text-amber-700 hover:bg-amber-50 cursor-pointer'
+                                }, 'Unlock')
+                              ),
+                              h('div', { className: 'text-[10px] ' + (c.job_numbering_locked ? 'text-slate-400' : 'text-emerald-700') },
+                                (c.job_numbering_locked ? 'Locked' : 'Can be set') + ' · next ' + c.numbering.nextJobNumber)
+                            ),
+                            h('div', null,
+                              h('div', { className: 'flex items-center gap-1.5' },
+                                h('span', { className: 'font-bold text-slate-700' }, 'Invoice:'),
+                                h('span', { className: 'font-mono' }, 'starts ' + c.numbering.invoiceStartNumber),
+                                c.invoice_numbering_locked && h('button', {
+                                  onClick: () => handleUnlockInvoiceNumbering(c),
+                                  title: 'Unlock invoice starting number',
+                                  'aria-label': 'Unlock invoice starting number for ' + c.name,
+                                  className: 'ml-1 px-1.5 py-0.5 rounded border border-amber-200 text-[10px] font-bold text-amber-700 hover:bg-amber-50 cursor-pointer'
+                                }, 'Unlock')
+                              ),
+                              h('div', { className: 'text-[10px] ' + (c.invoice_numbering_locked ? 'text-slate-400' : 'text-emerald-700') },
+                                (c.invoice_numbering_locked ? 'Locked' : 'Can be set') + ' · next ' + c.numbering.nextInvoiceNumber)
+                            )
+                          )
+                    ),
                     h('td', { className: 'px-4 py-3 text-slate-500 text-[11px]' }, new Date(c.created_at).toLocaleDateString()),
                     h('td', { className: 'px-4 py-3 text-right' },
                       h('div', { className: 'flex items-center justify-end gap-1.5' },
@@ -2532,7 +2799,7 @@
     return h(Modal, { title: 'Restore Database from JSON Backup', isOpen, onClose },
       h('div', { className: 'space-y-4' },
         h('div', { className: 'p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-semibold leading-relaxed' },
-          '⚠️ Warning: Restoring will merge or update the database tables with records from the uploaded backup file. Ensure you have downloaded a current backup first.'
+          'Warning: Restoring will merge or update the database tables with records from the uploaded backup file. Ensure you have downloaded a current backup first.'
         ),
         h('form', { onSubmit: handleSubmit, className: 'space-y-4' },
           h('input', {
@@ -2746,9 +3013,9 @@
           ),
           h('div', { className: 'text-[11px] text-slate-400 font-medium' },
             duration === 'lifetime'
-              ? '✨ This client will have permanent lifetime access with no expiration.'
+              ? 'This client will have permanent lifetime access with no expiration.'
               : expiresAt
-                ? `📅 Initial license active until ${new Date(expiresAt).toLocaleDateString()}.`
+                ? `Initial license active until ${new Date(expiresAt).toLocaleDateString()}.`
                 : 'Choose a billing duration or expiration date.'
           )
         ),
@@ -3158,7 +3425,7 @@
 
         // Read-only Lock Notice
         (status === 'expired' || isLiveExpired) && h('div', { className: 'p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-semibold' },
-          '⚠️ Setting status to Expired will activate Read-Only Order Lock. The client will be unable to record new orders until extended.'
+          'Setting status to Expired will activate Read-Only Order Lock. The client will be unable to record new orders until extended.'
         ),
 
         // Actions

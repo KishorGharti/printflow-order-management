@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+// Stub outgoing email before authController captures these functions, so the test never sends real mail.
+const emailService = require('../backend/src/services/emailService.js');
+emailService.sendRegistrationOtp = async () => ({ stubbed: true });
+emailService.sendPasswordResetOtp = async () => ({ stubbed: true });
 const authController = require('../backend/src/controllers/authController.js');
 const { pool } = require('../backend/src/config/db.js');
 const { verifyPassword } = require('../backend/src/utils/authHelper.js');

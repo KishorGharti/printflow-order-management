@@ -5,7 +5,56 @@ const { rowToDoc, rowsToDocs, buildInsertParts, buildSetClause } = require('../c
 const { deleteResource, isConfigured } = require('../config/cloudinary');
 const { getTenantBusinessId } = require('../middleware/rbac');
 const { createWorkNotification } = require('../services/notificationService');
+const { allocateNumber, lockCounter } = require('../services/numberingService');
+const { applyOrderStock, restoreConsumedStock } = require('../services/orderStockService');
+const { verifyPassword } = require('../utils/authHelper');
+
+const REPEAT_FIELDS = ['repeatOfOrderId', 'repeat_of_order_id', 'repeatOfOrderNumber', 'repeat_of_order_number', 'repeatDesignMode', 'repeat_design_mode'];
+const REPEAT_DESIGN_MODES = ['same', 'changes'];
+
+/** A repeat link is set once, when the order is created, and never changes afterwards. */
+function stripRepeatFields(body) {
+  for (const key of REPEAT_FIELDS) delete body[key];
+}
+
+/** Stock allocations are calculated on the server from the order's saved state; never taken from the browser. */
+function stripClientStockFields(body) {
+  delete body.stockAllocations;
+  delete body.stock_allocations;
+  delete body.stockUpdatedAt;
+  delete body.stock_updated_at;
+  delete body.stockChanged; // reply-only flag, echoed back by clients
+  delete body.stock_changed;
+}
+
+/**
+ * Order lists send media only as a count, so the browser holds empty placeholders for files it has
+ * not loaded. Placeholders are never stored: the saved files are kept and genuinely new files
+ * (by id) are added. Returns the media to save, or undefined when nothing should change.
+ */
+const isEmptyMediaEntry = (m) => !m || (typeof m === 'object' && Object.keys(m).length === 0);
+function mergeMediaPlaceholders(incoming, currentMedia) {
+  if (!Array.isArray(incoming) || !incoming.some(isEmptyMediaEntry)) return incoming;
+  let current = currentMedia;
+  try { current = typeof current === 'string' ? JSON.parse(current) : current; } catch { current = []; }
+  current = Array.isArray(current) ? current : [];
+  const known = new Set(current.map((m) => m && m.id).filter(Boolean));
+  const added = incoming.filter((m) => !isEmptyMediaEntry(m) && !(m.id && known.has(m.id)));
+  return added.length ? [...current, ...added] : undefined;
+}
 const logger = require('../utils/logger');
+
+/**
+ * Removes fields that only exist in the browser (for example the dashboard's _dueMs / _diffMs).
+ * No orders column starts with "_", so these can never be stored and would make the query fail.
+ */
+function stripTransientFields(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  for (const key of Object.keys(obj)) {
+    if (key.startsWith('_')) delete obj[key];
+  }
+  return obj;
+}
 
 // Statuses that trigger automatic cleanup of Cloudinary files
 const DELIVERY_STATUSES = ['Delivery', 'Pickup', 'Delivered', 'Done'];
@@ -211,24 +260,10 @@ const list = async (req, res, next) => {
          printer_id, printer_name, printed_by, printer_job_title,
          pickup_type, delivery_type, completed_at,
          notes, cancel_reason, cancelled_at, cancelled_by,
+         repeat_of_order_id, repeat_of_order_number, repeat_design_mode,
          stock_allocations,
-         COALESCE(
-           (SELECT jsonb_agg(
-             jsonb_build_object(
-               'productName', elem->>'productName',
-               'quantity', COALESCE((elem->>'quantity')::numeric, 0),
-               'unit', COALESCE(elem->>'unit', 'pcs'),
-               'itemDescription', COALESCE(elem->>'itemDescription', ''),
-               'fileBreakdown', COALESCE(elem->'fileBreakdown', '[]'::jsonb),
-               'unitPrice', COALESCE((elem->>'unitPrice')::numeric, 0),
-               'lineTotal', COALESCE((elem->>'lineTotal')::numeric, 0),
-               'variant', elem->>'variant',
-               'subItemGroupId', elem->>'subItemGroupId',
-               'subItemGroupName', elem->>'subItemGroupName'
-             )
-           ) FROM jsonb_array_elements(COALESCE(items, '[]'::jsonb)) AS elem),
-           '[]'::jsonb
-         ) AS items,
+         -- Full items (with item id, product id and rate) so saving an order from a list keeps them intact.
+         COALESCE(items, '[]'::jsonb) AS items,
          COALESCE(
            (SELECT string_agg(elem->>'productName', ', ')
             FROM jsonb_array_elements(COALESCE(items, '[]'::jsonb)) AS elem),
@@ -276,6 +311,32 @@ const getById = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /api/orders/:id/repeats
+ * The repeat jobs made from this order, newest first. Only job identity and status are returned,
+ * so every role that can view orders may see the links.
+ */
+const listRepeats = async (req, res, next) => {
+  try {
+    const businessId = getTenantBusinessId(req);
+    const { where, values } = resolveOrderWhere(req.params.id, businessId);
+    const source = (await pool.query(`SELECT id, business_id FROM orders WHERE ${where} LIMIT 1`, values)).rows[0];
+    if (!source) return res.status(404).json({ error: 'Order not found.' });
+    if (source.business_id && source.business_id !== businessId) {
+      return res.status(403).json({ error: 'Forbidden: Cross-business access is strictly prohibited.' });
+    }
+    const { rows } = await pool.query(
+      `SELECT id, local_id, order_number, order_date, status, repeat_design_mode, created_at
+       FROM orders WHERE business_id = $1 AND repeat_of_order_id = $2
+       ORDER BY created_at DESC`,
+      [businessId, String(source.id)]
+    );
+    res.json({ repeats: rowsToDocs(rows) });
+  } catch (err) {
+    next(err);
+  }
+};
+
 /** POST /api/orders */
 const create = async (req, res, next) => {
   try {
@@ -311,23 +372,100 @@ const create = async (req, res, next) => {
     if (!body.customerId) return res.status(400).json({ error: 'customerId is required.' });
     if (!Array.isArray(body.items) || body.items.length === 0)
       return res.status(400).json({ error: 'At least one order item is required.' });
-    if (!body.orderNumber) return res.status(400).json({ error: 'orderNumber is required.' });
 
     body.businessId = businessId;
+
+    // Job and invoice numbers are assigned by the server, never taken from the browser.
+    delete body.orderNumber;
+    delete body.order_number;
+    delete body.invoiceNumber;
+    delete body.invoice_number;
 
     // Strip computed / virtual fields if present
     delete body.itemSummary;
     delete body.item_summary;
     delete body.mediaCount;
     delete body.media_count;
+    stripTransientFields(body);
+    stripClientStockFields(body);
+    if (Array.isArray(body.media)) body.media = body.media.filter((m) => !isEmptyMediaEntry(m));
 
-    const { cols, placeholders, values } = buildInsertParts(body);
-    const { rows } = await pool.query(
-      `INSERT INTO orders (${cols.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING *`,
-      values
-    );
+    // Repeat job: the browser only names the old order. Its job number is read from the database,
+    // and the old order must belong to this business.
+    const repeatOfId = String(body.repeatOfOrderId || body.repeat_of_order_id || '').trim();
+    const repeatDesignMode = String(body.repeatDesignMode || body.repeat_design_mode || '').trim();
+    stripRepeatFields(body);
+    if (repeatOfId) {
+      const { where, values } = resolveOrderWhere(repeatOfId, businessId);
+      const source = (await pool.query(`SELECT id, business_id, order_number FROM orders WHERE ${where} LIMIT 1`, values)).rows[0];
+      if (!source || source.business_id !== businessId) {
+        return res.status(400).json({ error: 'The order being repeated was not found.' });
+      }
+      body.repeatOfOrderId = String(source.id);
+      body.repeatOfOrderNumber = source.order_number;
+      body.repeatDesignMode = REPEAT_DESIGN_MODES.includes(repeatDesignMode) ? repeatDesignMode : 'changes';
+      const note = `Repeat of ${source.order_number} (${body.repeatDesignMode === 'same' ? 'same design' : 'design changes'})`;
+      if (Array.isArray(body.history) && body.history.length) body.history[0] = { ...body.history[0], note };
+      else body.history = [{ status: body.status || 'New', timestamp: new Date().toISOString(), note }];
+    }
 
-    const order = rowToDoc(rows[0]);
+    // The browser sends a fresh localId for every new order. A retry with the same localId
+    // (for example after a network timeout) returns the order that was already created.
+    const idempotencyKey = body.localId ? String(body.localId) : null;
+    const findExisting = async (db) => {
+      if (!idempotencyKey) return null;
+      const r = await db.query('SELECT * FROM orders WHERE business_id = $1 AND local_id = $2 LIMIT 1', [businessId, idempotencyKey]);
+      return r.rows[0] || null;
+    };
+
+    let createdRow = null;
+    let stockChanged = false;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const existingRow = await findExisting(client);
+      if (existingRow) {
+        await client.query('ROLLBACK');
+        return res.status(200).json(sanitizeOrderForRole(rowToDoc(existingRow), req.user?.role));
+      }
+
+      const { formatted } = await allocateNumber(client, businessId, 'job');
+      body.orderNumber = formatted;
+
+      const { cols, placeholders, values } = buildInsertParts(body);
+      const { rows } = await client.query(
+        `INSERT INTO orders (${cols.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING *`,
+        values
+      );
+      // Reserve / consume the order's stock in the same transaction as the order itself.
+      let row = rows[0];
+      const inserted = rowToDoc(row);
+      const stock = await applyOrderStock(client, businessId, {
+        order: { id: String(row.id), orderNumber: inserted.orderNumber, status: inserted.status, items: inserted.items || [] },
+        previousAllocations: [],
+      });
+      if (stock.allocations.length || stock.stockChanged) {
+        row = (await client.query(
+          'UPDATE orders SET stock_allocations = $1, stock_updated_at = $2 WHERE id = $3 RETURNING *',
+          [JSON.stringify(stock.allocations), new Date().toISOString(), row.id]
+        )).rows[0];
+      }
+      stockChanged = stock.stockChanged;
+      await client.query('COMMIT');
+      createdRow = row;
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      // Two identical requests raced: the other one created the order, so return it.
+      if (txErr.code === '23505') {
+        const existingRow = await findExisting(pool);
+        if (existingRow) return res.status(200).json(sanitizeOrderForRole(rowToDoc(existingRow), req.user?.role));
+      }
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    const order = rowToDoc(createdRow);
 
     if (DESIGN_COMPLETED_STATUSES.includes(order.status)) {
       await autoCleanupCloudinaryFiles(order, order.status);
@@ -346,7 +484,7 @@ const create = async (req, res, next) => {
       });
     }
 
-    res.status(201).json(sanitizeOrderForRole(order, req.user?.role));
+    res.status(201).json({ ...sanitizeOrderForRole(order, req.user?.role), stockChanged });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Order number already exists.' });
     next(err);
@@ -389,6 +527,14 @@ const update = async (req, res, next) => {
       if (newStatus === 'Cancelled') {
         return res.status(400).json({ error: 'Order is already cancelled and closed.' });
       }
+    }
+
+    // Mistake is final: once an order is marked as Mistake its status cannot change again.
+    if (currentOrder.status === 'Mistake' && newStatus && newStatus !== 'Mistake') {
+      return res.status(400).json({
+        error: 'This order was marked as Mistake and is closed. Its status can no longer be changed.',
+        code: 'ORDER_MISTAKE_FINAL',
+      });
     }
 
     if (newStatus === 'Cancelled') {
@@ -465,21 +611,72 @@ const update = async (req, res, next) => {
     // Tenant Isolation: business_id is immutable and cannot be updated
     delete req.body.businessId;
     delete req.body.business_id;
+    stripRepeatFields(req.body);
+
+    // Job and invoice numbers are assigned by the server; an update can never change them.
+    // Invoice numbers are set through POST /api/orders/invoice-number.
+    delete req.body.orderNumber;
+    delete req.body.order_number;
+    delete req.body.invoiceNumber;
+    delete req.body.invoice_number;
+    stripTransientFields(req.body);
+    stripClientStockFields(req.body);
 
     // Computed / virtual fields from list projections
     delete req.body.itemSummary;
     delete req.body.item_summary;
     delete req.body.mediaCount;
     delete req.body.media_count;
+    if (req.body.media !== undefined) {
+      const media = mergeMediaPlaceholders(req.body.media, currentOrder.media);
+      if (media === undefined) delete req.body.media; else req.body.media = media;
+    }
 
-    const { setClause, values: setValues } = buildSetClause(req.body);
-    if (!setClause) return res.status(400).json({ error: 'No fields to update.' });
+    // Order lists do not include history; record a status change here when none was sent.
+    if (newStatus && newStatus !== currentOrder.status && !Array.isArray(req.body.history)) {
+      let history = currentOrder.history;
+      try { history = typeof history === 'string' ? JSON.parse(history) : history; } catch { history = []; }
+      history = Array.isArray(history) ? [...history] : [];
+      history.push({ status: newStatus, timestamp: new Date().toISOString() });
+      req.body.history = history;
+    }
 
-    const shiftedWhere = where.replace(/\$(\d+)/g, (_, num) => `$${Number(num) + setValues.length}`);
-    const { rows } = await pool.query(
-      `UPDATE orders SET ${setClause} WHERE ${shiftedWhere} RETURNING *`,
-      [...setValues, ...whereValues]
-    );
+    if (!buildSetClause(req.body).setClause) return res.status(400).json({ error: 'No fields to update.' });
+
+    // Save the order and its stock movements together: lock the order, recalculate its stock from
+    // the saved allocations, and write everything in one transaction.
+    let rows;
+    let stockChanged = false;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const locked = (await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [currentOrder.id])).rows[0];
+      const lockedDoc = rowToDoc(locked);
+      const stock = await applyOrderStock(client, businessId, {
+        order: {
+          id: String(locked.id),
+          orderNumber: locked.order_number,
+          status: req.body.status ?? locked.status,
+          items: Array.isArray(req.body.items) ? req.body.items : (lockedDoc.items || []),
+        },
+        previousAllocations: lockedDoc.stockAllocations || [],
+      });
+      req.body.stockAllocations = stock.allocations;
+      if (stock.stockChanged) req.body.stockUpdatedAt = new Date().toISOString();
+      stockChanged = stock.stockChanged;
+
+      const { setClause, values: setValues } = buildSetClause(req.body);
+      rows = (await client.query(
+        `UPDATE orders SET ${setClause} WHERE id = $${setValues.length + 1} RETURNING *`,
+        [...setValues, locked.id]
+      )).rows;
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
     const order = rowToDoc(rows[0]);
 
@@ -525,7 +722,7 @@ const update = async (req, res, next) => {
       }
     }
 
-    res.json(sanitizeOrderForRole(order, req.user?.role));
+    res.json({ ...sanitizeOrderForRole(order, req.user?.role), stockChanged });
   } catch (err) {
     next(err);
   }
@@ -557,55 +754,232 @@ const bulkUpsert = async (req, res, next) => {
       return res.status(400).json({ error: 'orders array is required.' });
     }
 
+    // Used to migrate old browser-stored orders and to restore a verified backup. Orders are matched
+    // only by identity (local id or server id) inside this business, never by job number, so a
+    // stale or reused number can never overwrite a different order.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const payloadIds = new Set();
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      for (const v of [item.localId, item.id, item._id]) if (v) payloadIds.add(String(v));
+    }
+    // An invoice number from the payload is kept only if no unrelated order already uses it
+    // (orders billed together in the same payload may share it).
+    const invoiceUsable = async (db, invoiceNumber, ownId) => {
+      const { rows } = await db.query(
+        'SELECT id, local_id FROM orders WHERE business_id = $1 AND invoice_number = $2',
+        [businessId, invoiceNumber]
+      );
+      return rows.every((r) => String(r.id) === String(ownId) || payloadIds.has(String(r.id)) || (r.local_id && payloadIds.has(String(r.local_id))));
+    };
+
     let inserted = 0;
     let updated = 0;
+    let renumbered = 0;
+    let skipped = 0;
+    let invoiceNumbersCleared = 0;
 
     for (const item of items) {
-      const orderNum = item.orderNumber;
-      if (!orderNum) continue;
+      if (!item || typeof item !== 'object') { skipped++; continue; }
+      const localId = String(item.localId || item.id || '').trim();
+      const serverId = [item._id, item.id].find((v) => UUID_RE.test(String(v || ''))) || null;
+      if (!localId && !serverId) { skipped++; continue; }
 
-      const localId = item.id || item.localId;
-      const cleanItem = { ...item, localId, businessId };
-      delete cleanItem.id;
-      delete cleanItem._id;
+      const wantedNumber = String(item.orderNumber || '').trim();
+      const wantedInvoice = String(item.invoiceNumber || '').trim();
+      const cleanItem = { ...item, localId: localId || undefined, businessId };
+      for (const key of ['id', '_id', 'business_id', 'orderNumber', 'order_number', 'invoiceNumber', 'invoice_number',
+        'itemSummary', 'item_summary', 'mediaCount', 'media_count', 'stockChanged', 'stock_changed']) delete cleanItem[key];
+      stripTransientFields(cleanItem);
 
-      // Check existing by orderNumber or localId within this business
-      const condVals = localId
-        ? [orderNum, localId, businessId]
-        : [orderNum, orderNum, businessId];
-      const existQ = localId
-        ? `SELECT id FROM orders WHERE (order_number = $1 OR local_id = $2) AND business_id = $3 LIMIT 1`
-        : `SELECT id FROM orders WHERE order_number = $1 AND business_id = $3 LIMIT 1`;
-      const existRes = await pool.query(existQ, condVals.slice(0, localId ? 3 : 2));
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const existing = (await client.query(
+          `SELECT id, invoice_number FROM orders
+           WHERE business_id = $1 AND ((local_id = $2 AND $2 <> '') OR id::text = $3)
+           LIMIT 1 FOR UPDATE`,
+          [businessId, localId, serverId || '']
+        )).rows[0];
 
-      if (existRes.rows.length) {
-        const { setClause, values: setValues } = buildSetClause(cleanItem);
-        if (setClause) {
-          await pool.query(
-            `UPDATE orders SET ${setClause} WHERE id = $${setValues.length + 1}`,
-            [...setValues, existRes.rows[0].id]
-          );
-        }
-        updated++;
-      } else {
-        try {
+        if (existing) {
+          // Restoring an order never changes its job number or replaces its invoice number.
+          if (wantedInvoice && !existing.invoice_number) {
+            if (await invoiceUsable(client, wantedInvoice, existing.id)) cleanItem.invoiceNumber = wantedInvoice;
+            else invoiceNumbersCleared++;
+          }
+          const { setClause, values: setValues } = buildSetClause(cleanItem);
+          if (setClause) {
+            await client.query(`UPDATE orders SET ${setClause} WHERE id = $${setValues.length + 1}`, [...setValues, existing.id]);
+          }
+          updated++;
+        } else {
+          // Keep the order's original job number when it is still free; otherwise the server assigns one.
+          await lockCounter(client, businessId, 'job');
+          let orderNumber = wantedNumber;
+          const taken = !orderNumber || (await client.query(
+            'SELECT 1 FROM orders WHERE business_id = $1 AND order_number = $2 LIMIT 1',
+            [businessId, orderNumber]
+          )).rows.length > 0;
+          if (taken) {
+            orderNumber = (await allocateNumber(client, businessId, 'job')).formatted;
+            if (wantedNumber) renumbered++;
+          }
+          cleanItem.orderNumber = orderNumber;
+          if (wantedInvoice) {
+            await lockCounter(client, businessId, 'invoice');
+            if (await invoiceUsable(client, wantedInvoice, null)) cleanItem.invoiceNumber = wantedInvoice;
+            else invoiceNumbersCleared++;
+          }
           const { cols, placeholders, values } = buildInsertParts(cleanItem);
-          await pool.query(
-            `INSERT INTO orders (${cols.join(', ')}) VALUES (${placeholders.join(', ')})`,
-            values
-          );
+          await client.query(`INSERT INTO orders (${cols.join(', ')}) VALUES (${placeholders.join(', ')})`, values);
           inserted++;
-        } catch (e) {
-          if (e.code !== '23505') throw e; // skip duplicate key
         }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        if (e.code !== '23505') throw e;
+        skipped++; // another request saved the same order at the same moment
+      } finally {
+        client.release();
       }
     }
 
-    logger.info(`📦 Bulk orders upsert: ${inserted} inserted, ${updated} updated for business: ${businessId}`);
-    res.json({ success: true, inserted, updated });
+    logger.info(`📦 Bulk orders upsert: ${inserted} inserted, ${updated} updated, ${renumbered} renumbered, ${skipped} skipped for business: ${businessId}`);
+    res.json({ success: true, inserted, updated, renumbered, skipped, invoiceNumbersCleared });
   } catch (err) {
     next(err);
   }
 };
 
-module.exports = { list, getById, create, update, remove, bulkUpsert, autoCleanupCloudinaryFiles, sanitizeOrderForRole, isFinancialRestrictedRole };
+/**
+ * POST /api/orders/invoice-number  { orderIds: [...] }
+ * Assigns one invoice number to the given orders (one order, or several billed together).
+ * If they already share an invoice number it is returned unchanged, so retries are safe.
+ * Otherwise the next number is allocated and saved in the same transaction.
+ */
+const assignInvoiceNumber = async (req, res, next) => {
+  try {
+    if (req.user && isFinancialRestrictedRole(req.user.role)) {
+      return res.status(403).json({ error: `Forbidden: Role "${req.user.role}" is not permitted to issue invoices.` });
+    }
+    const businessId = getTenantBusinessId(req);
+    const ids = Array.isArray(req.body?.orderIds)
+      ? [...new Set(req.body.orderIds.map((v) => String(v || '').trim()).filter(Boolean))]
+      : [];
+    if (!ids.length) return res.status(400).json({ error: 'orderIds is required.' });
+    if (ids.length > 200) return res.status(400).json({ error: 'Too many orders in one invoice.' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `SELECT id, local_id, order_number, invoice_number FROM orders
+         WHERE business_id = $1 AND (id::text = ANY($2::text[]) OR local_id = ANY($2::text[]))
+         ORDER BY id
+         FOR UPDATE`,
+        [businessId, ids]
+      );
+      // Every requested order must exist in this business (also blocks cross-business IDs).
+      const matched = new Set();
+      for (const r of rows) { matched.add(String(r.id)); if (r.local_id) matched.add(String(r.local_id)); }
+      if (!rows.length || ids.some((id) => !matched.has(id))) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'One or more orders were not found.' });
+      }
+
+      const current = [...new Set(rows.map((r) => String(r.invoice_number || '').trim()))];
+      let invoiceNumber;
+      let reused = false;
+      if (current.length === 1 && current[0]) {
+        invoiceNumber = current[0];
+        reused = true;
+      } else {
+        invoiceNumber = (await allocateNumber(client, businessId, 'invoice')).formatted;
+        await client.query(
+          'UPDATE orders SET invoice_number = $1, updated_at = NOW() WHERE business_id = $2 AND id = ANY($3::uuid[])',
+          [invoiceNumber, businessId, rows.map((r) => r.id)]
+        );
+      }
+      await client.query('COMMIT');
+
+      return res.json({
+        ok: true,
+        invoiceNumber,
+        reused,
+        orders: rows.map((r) => ({ _id: r.id, id: r.id, localId: r.local_id, orderNumber: r.order_number, invoiceNumber })),
+      });
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/orders/:id/restore-stock   body: { pin }
+ * Puts an order's consumed materials back into stock (materials physically returned).
+ * Needs the PIN of an active team member whose job title is Owner, Admin, Inventory, Stock or Manager,
+ * the same rule the order screen shows. Order, stock quantities and RESTORE movements are saved together.
+ */
+const RESTORE_AUTHORIZED_TITLE = /admin|owner|inventory|stock|manager/i;
+
+const restoreStock = async (req, res, next) => {
+  try {
+    const businessId = getTenantBusinessId(req);
+    const pin = String(req.body?.pin || '').replace(/\D/g, '');
+    if (!pin) return res.status(400).json({ error: 'Authorized inventory PIN required.' });
+
+    const members = (await pool.query(
+      `SELECT name, job_title, pin, password_hash FROM team_members
+       WHERE business_id = $1 AND is_active IS DISTINCT FROM false AND COALESCE(status, '') <> 'inactive'`,
+      [businessId]
+    )).rows.filter((m) => RESTORE_AUTHORIZED_TITLE.test(String(m.job_title || '')));
+    if (!members.length) {
+      return res.status(403).json({ error: 'Stock restore requires an Owner, Admin, Inventory, Stock, or Manager team role. Add an authorized member in Profile → Team.' });
+    }
+    const member = members.find((m) => verifyPassword(pin, m.pin) || verifyPassword(pin, m.password_hash));
+    if (!member) return res.status(403).json({ error: 'Incorrect PIN or this team member is not authorized to restore stock.' });
+
+    const { where, values } = resolveOrderWhere(req.params.id, businessId);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const locked = (await client.query(`SELECT * FROM orders WHERE ${where} FOR UPDATE`, values)).rows[0];
+      if (!locked || (locked.business_id && locked.business_id !== businessId)) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Order not found.' });
+      }
+      const lockedDoc = rowToDoc(locked);
+      const result = await restoreConsumedStock(client, businessId, {
+        order: { id: String(locked.id), orderNumber: locked.order_number },
+        allocations: lockedDoc.stockAllocations || [],
+        user: member.name,
+      });
+      const saved = (await client.query(
+        'UPDATE orders SET stock_allocations = $1, stock_updated_at = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
+        [JSON.stringify(result.allocations), new Date().toISOString(), locked.id]
+      )).rows[0];
+      await client.query('COMMIT');
+      return res.json({
+        order: sanitizeOrderForRole(rowToDoc(saved), req.user && req.user.role),
+        restored: result.restored,
+        authorizedBy: member.name,
+        stockChanged: result.restored > 0,
+      });
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { list, getById, listRepeats, create, update, remove, bulkUpsert, assignInvoiceNumber, restoreStock, autoCleanupCloudinaryFiles, sanitizeOrderForRole, isFinancialRestrictedRole };

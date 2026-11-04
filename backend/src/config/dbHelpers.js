@@ -59,6 +59,10 @@ const COLUMN_MAP = {
   cancelled_at:                     'cancelledAt',
   cancelled_by:                     'cancelledBy',
   cancel_reason:                    'cancelReason',
+  mistake_at:                       'mistakeAt',
+  mistake_cost:                     'mistakeCost',
+  mistake_reason:                   'mistakeReason',
+  mistake_by:                       'mistakeBy',
   previous_status:                  'previousStatus',
   min_stock_alert:                  'minStockAlert',
   opening_balance_date:             'openingBalanceDate',
@@ -209,6 +213,20 @@ const VIRTUAL_OR_INTERNAL_FIELDS = new Set([
   'itemSummary', 'item_summary', 'mediaCount', 'media_count'
 ]);
 
+// Request-body keys become SQL column names, so only plain identifiers are allowed.
+// Anything else (spaces, quotes, brackets, operators) would be SQL injection.
+const SAFE_COLUMN = /^(?:[a-z_][a-z0-9_]{0,62}|"(?:user|timestamp)")$/;
+
+function toColumn(camel) {
+  const snake = CAMEL_TO_SNAKE[camel] || camelToSnake(camel);
+  if (!SAFE_COLUMN.test(snake)) {
+    const err = new Error(`Invalid field name: ${String(camel).slice(0, 60)}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return snake;
+}
+
 /**
  * Given a plain object of { camelCaseField: value } pairs, returns
  * { cols: ['col1','col2',...], placeholders: ['$1','$2',...], values: [...] }
@@ -228,7 +246,7 @@ function buildInsertParts(data, startIdx = 1) {
     if (VIRTUAL_OR_INTERNAL_FIELDS.has(camel)) continue;
     if (val === undefined) continue;
 
-    const snake = CAMEL_TO_SNAKE[camel] || camelToSnake(camel);
+    const snake = toColumn(camel);
     if (VIRTUAL_OR_INTERNAL_FIELDS.has(snake)) continue;
     cols.push(snake);
     placeholders.push(`$${idx++}`);
@@ -252,8 +270,10 @@ function buildSetClause(data, startIdx = 1) {
     if (VIRTUAL_OR_INTERNAL_FIELDS.has(camel)) continue;
     if (val === undefined) continue;
 
-    const snake = CAMEL_TO_SNAKE[camel] || camelToSnake(camel);
+    const snake = toColumn(camel);
     if (VIRTUAL_OR_INTERNAL_FIELDS.has(snake)) continue;
+    // A record never moves to another shop through an update.
+    if (snake === 'business_id') continue;
     parts.push(`${snake} = $${idx++}`);
     values.push(serializeValue(val));
   }

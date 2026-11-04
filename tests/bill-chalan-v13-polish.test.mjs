@@ -9,12 +9,16 @@ test('Bill and Chalan PDFs exclude Description / Print Instruction; Bill may add
   const chalanStart = app.indexOf('const createReferenceChalanPdf');
   const bill = app.slice(billStart, chalanStart);
   const chalan = app.slice(chalanStart, app.indexOf('const storageService', chalanStart));
-  assert.match(bill, /const items=expandGroupedItemsForDocuments\(sourceItems\)/);
-  assert.match(bill, /const productName=item\?String\(item\.productName\|\|'Product'\):''/);
+  assert.match(bill, /const items\s*=\s*expandGroupedItemsForDocuments\(sourceItems\)/);
+  // Rows show the product name plus the order's job number only (documentItemDescription).
+  assert.match(bill, /const productName\s*=\s*item\s*\?\s*documentItemDescription\(item,\s*order\)\s*:\s*''/);
   assert.match(app, /const expandGroupedItemsForDocuments =/);
   assert.equal(bill.includes('item.itemDescription'), false);
-  assert.match(chalan, /const description\s*=\s*item\s*\?\s*String\(item\.productName\s*\|\|\s*'Product'\)\s*:\s*''/);
+  assert.match(chalan, /const description\s*=\s*item\s*\?\s*documentItemDescription\(item,\s*order\)\s*:\s*''/);
   assert.equal(chalan.includes('item.itemDescription'), false);
+  const helper = app.slice(app.indexOf('const documentJobNumber'), app.indexOf('const createReferenceBillPdf'));
+  assert.match(helper, /String\(item\?\.productName \|\| 'Product'\)/);
+  assert.equal(/item\??\.(itemDescription|printInstruction|instructions)/i.test(helper), false);
 });
 
 test('Chalan client details dynamically stack when fields are missing', () => {

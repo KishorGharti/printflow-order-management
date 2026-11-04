@@ -2,11 +2,28 @@
 
 const { pool } = require('../config/db');
 const { rowToDoc } = require('../config/dbHelpers');
-const { hashPassword, verifyPassword, signToken, sanitizeUser } = require('../utils/authHelper');
+const { hashPassword, verifyPassword, isLegacyPlaintext, generateOtp, signToken, sanitizeUser } = require('../utils/authHelper');
 const { ROLES, ROLE_PERMISSIONS, getCombinedPermissions } = require('../config/permissions');
 const { sendPasswordResetOtp, sendRegistrationOtp } = require('../services/emailService');
 const logger = require('../utils/logger');
 const { checkLoginLockout, recordFailedLogin, resetFailedLogins, getClientIp } = require('../services/securityPolicyService');
+
+// ─── One-time code guess limit ────────────────────────────────────────────────
+// A 6-digit code can be guessed by trying many times. After MAX_OTP_GUESSES wrong tries the
+// code is cancelled and the user must request a new one.
+const MAX_OTP_GUESSES = 5;
+const otpFailures = new Map();
+
+async function recordWrongOtp(key, cancelCode) {
+  const count = (otpFailures.get(key) || 0) + 1;
+  if (count >= MAX_OTP_GUESSES) {
+    otpFailures.delete(key);
+    await cancelCode();
+    return true;
+  }
+  otpFailures.set(key, count);
+  return false;
+}
 
 // ─── Multi-tenant helpers ─────────────────────────────────────────────────────
 
@@ -252,6 +269,10 @@ const login = async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid email/phone or password.' });
     }
 
+    if (isLegacyPlaintext(member.password_hash) && verifyPassword(credPass, member.password_hash)) {
+      await pool.query('UPDATE team_members SET password_hash = $1 WHERE id = $2', [hashPassword(credPass), member.id]).catch(() => {});
+    }
+
     const role = member.role || ROLES.RECEPTION;
     const businessId = member.business_id || 'global_settings';
 
@@ -404,6 +425,9 @@ const clientLogin = async (req, res, next) => {
     if (!clientEmail) {
       return res.status(400).json({ error: 'Please enter your registered Gmail address.' });
     }
+    if (!password) {
+      return res.status(400).json({ error: 'Please enter your password.' });
+    }
 
     const clientIp = getClientIp(req);
     const lockStatus = await checkLoginLockout(clientEmail, clientIp);
@@ -471,8 +495,17 @@ const clientLogin = async (req, res, next) => {
       });
     }
 
+    // An account created by the developer has no password yet. Only the owner of the email may set
+    // one, so it is set through the emailed code (Forgot Password), not by whoever signs in first.
+    if (!client.password_hash) {
+      return res.status(403).json({
+        error: 'Please set your password first: click "Forgot Password" and we will email a 6-digit code to this address.',
+        code: 'PASSWORD_NOT_SET',
+      });
+    }
+
     // Password verification logic
-    if (client.password_hash && password) {
+    {
       const isMatch = verifyPassword(password, client.password_hash);
       if (!isMatch) {
         const lockRes = await recordFailedLogin(clientEmail, clientIp);
@@ -504,10 +537,9 @@ const clientLogin = async (req, res, next) => {
           code: 'INVALID_CREDENTIALS',
         });
       }
-    } else if (password) {
-      // First-time login: hash and store the password in PostgreSQL
-      const hashed = hashPassword(password);
-      await pool.query(`UPDATE saas_clients SET password_hash = $1 WHERE id = $2`, [hashed, client.id]);
+      if (isLegacyPlaintext(client.password_hash)) {
+        await pool.query('UPDATE saas_clients SET password_hash = $1 WHERE id = $2', [hashPassword(password), client.id]);
+      }
     }
 
     // Update last_login_at timestamp
@@ -621,7 +653,7 @@ const clientForgotPassword = async (req, res, next) => {
       return res.status(403).json({ error: 'This account has been deactivated. Please contact Algora or your administrator.' });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = generateOtp();
     if (isTeam) {
       await pool.query(
         `UPDATE team_members
@@ -640,7 +672,7 @@ const clientForgotPassword = async (req, res, next) => {
 
     try {
       await sendPasswordResetOtp(target.email, otp, target.name);
-      logger.info(`✉️ Password reset OTP (${otp}) sent to ${target.email}`);
+      logger.info(`✉️ Password reset code sent to ${target.email}`);
     } catch (mailErr) {
       logger.error(`Failed to send password reset email: ${mailErr.message}`);
       return res.status(500).json({ error: 'Failed to send reset email. Please verify your connection or try again later.' });
@@ -701,9 +733,17 @@ const clientResetPassword = async (req, res, next) => {
       return res.status(404).json({ error: 'Account not found.' });
     }
 
+    const resetKey = `reset:${isTeam ? 'team_members' : 'saas_clients'}:${target.id}`;
     if (!target.reset_token || target.reset_token !== token) {
+      const table = isTeam ? 'team_members' : 'saas_clients';
+      const cancelled = target.reset_token && await recordWrongOtp(resetKey, () =>
+        pool.query(`UPDATE ${table} SET reset_token = NULL, reset_token_exp = NULL WHERE id = $1`, [target.id]));
+      if (cancelled) {
+        return res.status(429).json({ error: 'Too many wrong codes. This code has been cancelled. Please request a new code.', code: 'OTP_CANCELLED' });
+      }
       return res.status(400).json({ error: 'Invalid verification code. Please check your email and try again.' });
     }
+    otpFailures.delete(resetKey);
 
     if (new Date(target.reset_token_exp) < new Date()) {
       return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
@@ -764,7 +804,7 @@ const clientRegister = async (req, res, next) => {
       [clientEmail]
     );
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = generateOtp();
     const hashed = hashPassword(clientPass);
 
     if (existing.rows.length) {
@@ -789,7 +829,7 @@ const clientRegister = async (req, res, next) => {
 
     try {
       await sendRegistrationOtp(clientEmail, otp, clientName, clientCompany);
-      logger.info(`✉️ Registration verification OTP (${otp}) sent to ${clientEmail}`);
+      logger.info(`✉️ Registration verification code sent to ${clientEmail}`);
     } catch (mailErr) {
       logger.error(`Failed to send registration email: ${mailErr.message}`);
       return res.status(500).json({ error: 'Failed to send verification email. Please check your email address.' });
@@ -832,8 +872,14 @@ const clientVerifyRegistration = async (req, res, next) => {
 
     const client = clientRes.rows[0];
     if (!client.verification_otp || client.verification_otp !== token) {
+      const cancelled = client.verification_otp && await recordWrongOtp(`register:${client.id}`, () =>
+        pool.query('UPDATE saas_clients SET verification_otp = NULL, verification_exp = NULL WHERE id = $1', [client.id]));
+      if (cancelled) {
+        return res.status(429).json({ error: 'Too many wrong codes. This code has been cancelled. Please register again to get a new code.', code: 'OTP_CANCELLED' });
+      }
       return res.status(400).json({ error: 'Invalid verification code. Please check your email and try again.' });
     }
+    otpFailures.delete(`register:${client.id}`);
 
     if (new Date(client.verification_exp) < new Date()) {
       return res.status(400).json({ error: 'Verification code has expired. Please register again to get a fresh code.' });
@@ -897,14 +943,23 @@ const clientVerifyRegistration = async (req, res, next) => {
  */
 const clientTokenSync = async (req, res, next) => {
   try {
-    const { clientId, email } = req.body;
+    const { clientId, email, password } = req.body;
     const clientEmail = String(email || '').trim().toLowerCase();
 
     if (!clientId && !clientEmail) {
       return res.status(400).json({ error: 'Client identifier is required.' });
     }
+    if (!password) {
+      return res.status(400).json({ error: 'Password is required.' });
+    }
+    const clientIp = getClientIp(req);
+    const lockKey = clientEmail || `client:${clientId}`;
+    const lockStatus = await checkLoginLockout(lockKey, clientIp);
+    if (lockStatus.locked) {
+      return res.status(429).json({ error: `Account temporarily locked. Please try again in ${lockStatus.remainingMinutes} minute(s).`, code: 'ACCOUNT_LOCKED' });
+    }
 
-    let query = 'SELECT id, name, email, phone, status, business_id, company_name FROM saas_clients WHERE ';
+    let query = 'SELECT id, name, email, phone, status, business_id, company_name, password_hash FROM saas_clients WHERE ';
     const params = [];
     if (clientId && clientEmail) {
       query += 'id = $1 AND LOWER(email) = LOWER($2)';
@@ -918,14 +973,15 @@ const clientTokenSync = async (req, res, next) => {
     }
 
     const { rows } = await pool.query(query, params);
-    if (!rows.length) {
-      return res.status(404).json({ error: 'Client account not found.' });
-    }
-
     const client = rows[0];
+    if (!client || !verifyPassword(password, client.password_hash)) {
+      await recordFailedLogin(lockKey, clientIp);
+      return res.status(401).json({ error: 'Incorrect email or password.', code: 'INVALID_CREDENTIALS' });
+    }
     if (client.status === 'deactivated' || client.status === 'suspended') {
       return res.status(403).json({ error: 'Forbidden: Account is deactivated.' });
     }
+    resetFailedLogins(lockKey, clientIp);
 
     const businessId = client.business_id || await getOrCreateClientBusinessId(client.id, client.email, client.company_name || client.name);
 

@@ -94,6 +94,7 @@
       check: '<path d="M20 6 9 17l-5-5"/>',
       alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
       clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+      lock: '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
       arrowLeft: '<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>',
       sparkles: '<path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>',
       send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
@@ -113,6 +114,7 @@
       , keyboard: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 16h10"/>'
       , copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>'
       , arrowUp: '<path d="m18 15-6-6-6 6"/>'
+      , repeat: '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>'
       , receipt: '<path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1-2-1Z"/><path d="M16 8h-8"/><path d="M16 12h-8"/><path d="M10 16h-2"/>'
       , truck: '<path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/><path d="M15 18H9"/><path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/>'
       , fileText: '<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/>'
@@ -342,6 +344,54 @@
   const INITIAL_STOCK = [];
   const INITIAL_VENDORS = [];
   const INITIAL_ORDERS = [];
+
+  // Connection status for the Print Ghar server. navigator.onLine only says whether the device has a
+  // network; the /health check confirms the backend and its database can actually be reached.
+  const SYSTEM_OFFLINE_MESSAGE = 'System is completely offline. Please check your internet connection or contact the administrator.';
+  const ORDER_NOT_SAVED_MESSAGE = 'The order was not saved because the server could not be reached. Please try again.';
+  const connectionMonitor = {
+    online: true,
+    listeners: new Set(),
+    started: false,
+    async check() {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return this.setOnline(false);
+      try {
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = setTimeout(() => controller && controller.abort(), 4000);
+        let res;
+        try {
+          res = await fetch('/health', { cache: 'no-store', signal: controller ? controller.signal : undefined });
+        } finally {
+          clearTimeout(timer);
+        }
+        const data = res.ok ? await res.json().catch(() => ({})) : {};
+        return this.setOnline(res.ok && data.status === 'ok' && data.db === 'connected');
+      } catch (_) {
+        return this.setOnline(false);
+      }
+    },
+    setOnline(value) {
+      if (value !== this.online) {
+        this.online = value;
+        this.listeners.forEach(listener => { try { listener(value); } catch (_) { } });
+      }
+      return value;
+    },
+    subscribe(listener) {
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    },
+    // Checks every 20 seconds while online and every 5 seconds while offline, plus on network events.
+    start() {
+      if (this.started || typeof window === 'undefined') return;
+      this.started = true;
+      window.addEventListener('online', () => this.check());
+      window.addEventListener('offline', () => this.setOnline(false));
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') this.check(); });
+      const loop = () => setTimeout(() => this.check().finally(loop), this.online ? 20000 : 5000);
+      this.check().finally(loop);
+    }
+  };
   const INITIAL_EXPENSES = [];
   const DEFAULT_SETTINGS = {
     shopName: 'Print Ghar',
@@ -1503,6 +1553,21 @@
     }));
   });
 
+  // Bill / Chalan rows show the job number each order was given when it was created.
+  // A combined bill tags every item with its own order's number (billingJobNumber);
+  // a single-order document uses that order's number. Nothing new is generated.
+  const documentJobNumber = (item, order) => {
+    const own = String(item?.billingJobNumber || '').trim();
+    if (own) return own;
+    if (Array.isArray(order?.billingJobNumbers) && order.billingJobNumbers.length > 1) return '';
+    return String(order?.orderNumber || '').trim();
+  };
+  const documentItemDescription = (item, order) => {
+    const productName = String(item?.productName || 'Product');
+    const jobNumber = documentJobNumber(item, order);
+    return jobNumber ? `${productName} [${jobNumber}]` : productName;
+  };
+
   const createReferenceBillPdf = (storage, order = {}, configOverride = null) => {
     const settings = storage.getSettings();
     const config = { ...normalizeBillReferenceConfig(settings), ...(configOverride || {}) };
@@ -1628,7 +1693,7 @@
         const fontMm = fontSize * 0.352778;
         const lineHeight = fontMm * 1.02;
         return rows.map(item => {
-          const productName = item ? String(item.productName || 'Product') : '';
+          const productName = item ? documentItemDescription(item, order) : '';
           const descriptionParts = item ? [productName] : [''];
           const lines = [];
           descriptionParts.forEach(part => lines.push(...doc.splitTextToSize(part, Math.max(8, cols.descRight - cols.snRight - 3.1))));
@@ -1868,7 +1933,7 @@
         setFont(fontSize, 'normal');
         const fontMm = fontSize * .352778, lineHeight = fontMm * 1.03;
         return rows.map(item => {
-          const description = item ? String(item.productName || 'Product') : '';
+          const description = item ? documentItemDescription(item, order) : '';
           const remarks = item ? defaultRemark : '';
           const descLines = item ? doc.splitTextToSize(description, Math.max(8, cols.descRight - cols.snRight - 3.0)) : [''];
           const remarkLines = item && remarks ? doc.splitTextToSize(remarks, Math.max(7, cols.right - cols.qtyRight - 3.0)) : [''];
@@ -5642,7 +5707,9 @@
     },
 
     saveSettings(st) {
-      const merged = { ...DEFAULT_SETTINGS, ...st, billReferenceConfig: normalizeBillReferenceConfig(st), chalanReferenceConfig: normalizeChalanReferenceConfig(st) };
+      // lockJobNumbering / lockInvoiceNumbering are one-off request flags for the server; never stored in settings.
+      const { lockJobNumbering, lockInvoiceNumbering, ...settingsInput } = st || {};
+      const merged = { ...DEFAULT_SETTINGS, ...settingsInput, billReferenceConfig: normalizeBillReferenceConfig(settingsInput), chalanReferenceConfig: normalizeChalanReferenceConfig(settingsInput) };
       this._settingsCache = merged;
       try {
         localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(merged));
@@ -5660,15 +5727,39 @@
       fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(merged)
+        body: JSON.stringify({ ...merged, ...(lockJobNumbering ? { lockJobNumbering: true } : {}), ...(lockInvoiceNumbering ? { lockInvoiceNumbering: true } : {}) })
       })
         .then(async res => {
+          const data = await res.json().catch(() => ({}));
           if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.error || `HTTP ${res.status}`);
+            const saveErr = new Error(data.error || `HTTP ${res.status}`);
+            saveErr.code = data.code;
+            throw saveErr;
+          }
+          // Keep the one-time job / invoice numbering lock states in step with the server.
+          const lockChanged = this._settingsCache && ['jobNumberingLocked', 'invoiceNumberingLocked']
+            .some(flag => typeof data[flag] === 'boolean' && this._settingsCache[flag] !== data[flag]);
+          if (lockChanged) {
+            this._settingsCache = {
+              ...this._settingsCache,
+              ...(typeof data.jobNumberingLocked === 'boolean' ? { jobNumberingLocked: data.jobNumberingLocked } : {}),
+              ...(typeof data.invoiceNumberingLocked === 'boolean' ? { invoiceNumberingLocked: data.invoiceNumberingLocked } : {})
+            };
+            try {
+              localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(this._settingsCache));
+            } catch (_) { }
+            if (typeof window !== 'undefined' && window.__pgDebouncedRefresh) window.__pgDebouncedRefresh();
           }
         })
         .catch(err => {
+          if (err && (err.code === 'JOB_NUMBERING_LOCKED' || err.code === 'INVOICE_NUMBERING_LOCKED')) {
+            // Put back the saved values so the screen matches what is really stored.
+            if (typeof window !== 'undefined' && window.alert) window.alert(err.message);
+            this.loadSettingsFromServer().then(() => {
+              if (typeof window !== 'undefined' && window.__pgDebouncedRefresh) window.__pgDebouncedRefresh();
+            });
+            return;
+          }
           console.error('Backend offline: Failed to save settings to database:', err);
           if (typeof window !== 'undefined' && window.alert) {
             window.alert('Backend is offline. Unable to save settings to database. Changes were not saved to localStorage.');
@@ -6712,146 +6803,39 @@
       });
     },
 
-    _reconcileOrderStock(order, previousOrder = null) {
-      const products = this.getProducts();
-      const stock = this.getStock();
-      const transactions = this.getStockTransactions();
-      const now = new Date().toISOString();
-      const previousAllocations = Array.isArray(previousOrder?.stockAllocations) ? previousOrder.stockAllocations : [];
-      const previousMap = new Map(previousAllocations.map(allocation => [`${allocation.orderItemId}:${allocation.inventoryItemId}:${allocation.trackingMode}`, allocation]));
-      const nextAllocations = [];
-      const nextItemIds = new Set((order.items || []).map(item => item.id));
-      const addTransaction = (allocation, type, quantity, reason) => {
-        if (!(quantity > 0)) return;
-        transactions.unshift({
-          id: createId('stocktxn'), inventoryItemId: allocation.inventoryItemId,
-          inventoryItemName: allocation.inventoryItemName, quantity,
-          signedQuantity: type === 'RESERVE' || type === 'CONSUME' ? -quantity : quantity,
-          unit: allocation.unit, transactionType: type, orderId: order.id,
-          orderNumber: order.orderNumber, masterProductId: allocation.masterProductId,
-          masterProductName: allocation.masterProductName, orderItemId: allocation.orderItemId,
-          timestamp: now, user: 'System', automatic: true, reason
-        });
-      };
-      const consumeAllocation = allocation => {
-        const amount = Math.max(0, Number(allocation.reservedQuantity || 0));
-        if (!amount || allocation.trackingMode !== 'AUTO') return allocation;
-        const stockIndex = stock.findIndex(entry => entry.id === allocation.inventoryItemId);
-        if (stockIndex >= 0) stock[stockIndex] = { ...stock[stockIndex], quantity: Number(stock[stockIndex].quantity || 0) - amount, updatedAt: now };
-        addTransaction(allocation, 'CONSUME', amount, `Auto consumption at ${allocation.deductStockAt}`);
-        return { ...allocation, reservedQuantity: 0, consumedQuantity: Number(allocation.consumedQuantity || 0) + amount, consumedAt: allocation.consumedAt || now };
-      };
-
-      (order.items || []).forEach(orderItem => {
-        const product = products.find(entry => entry.id === orderItem.productId);
-        const existingForItem = previousAllocations.filter(allocation => allocation.orderItemId === orderItem.id);
-        const applicableMaterials = (product?.materials || []).filter(material => !material.variant || material.variant === 'ALL' || material.variant === orderItem.variant);
-        const recipe = existingForItem.length ? existingForItem : (product?.stockMaterialsEnabled ? applicableMaterials.map(material => ({
-          id: createId('alloc'), orderItemId: orderItem.id, masterProductId: product.id, masterProductName: product.name,
-          inventoryItemId: material.inventoryItemId, inventoryItemName: material.inventoryItemName || stock.find(entry => entry.id === material.inventoryItemId)?.name || 'Inventory item',
-          quantityPerUnit: material.trackingMode === 'MANUAL' ? (Number(material.quantityPerUnit) || 0) : Math.max(0, Number(material.quantityPerUnit || 0)),
-          unit: material.unit || stock.find(entry => entry.id === material.inventoryItemId)?.unit || 'pcs',
-          trackingMode: material.trackingMode === 'MANUAL' ? 'MANUAL' : 'AUTO',
-          deductStockAt: product.deductAutoStockAt || 'Finishing', reservedQuantity: 0, consumedQuantity: 0,
-          recipeSnapshotAt: now
-        })) : []);
-        recipe.forEach(base => {
-          const key = `${orderItem.id}:${base.inventoryItemId}:${base.trackingMode}`;
-          const old = previousMap.get(key) || base;
-          const desired = old.trackingMode === 'AUTO' ? Math.max(0, Number(orderItem.quantity || 0)) * Math.max(0, Number(old.quantityPerUnit || 0)) : 0;
-          let allocation = { ...old, requiredQuantity: desired };
-          if (allocation.trackingMode === 'AUTO' && !allocation.consumedAt) {
-            const priorReserved = Math.max(0, Number(old.reservedQuantity || 0));
-            const delta = desired - priorReserved;
-            if (delta > 0) addTransaction(allocation, 'RESERVE', delta, priorReserved ? 'Order quantity increased' : 'Order created');
-            if (delta < 0) addTransaction(allocation, 'RELEASE', -delta, desired === 0 ? 'Order item removed' : 'Order quantity decreased');
-            allocation.reservedQuantity = desired;
-          } else if (allocation.trackingMode === 'AUTO' && allocation.consumedAt) {
-            const consumed = Math.max(0, Number(allocation.consumedQuantity || 0));
-            const additional = desired - consumed;
-            if (additional > 0) {
-              const stockIndex = stock.findIndex(entry => entry.id === allocation.inventoryItemId);
-              if (stockIndex >= 0) stock[stockIndex] = { ...stock[stockIndex], quantity: Number(stock[stockIndex].quantity || 0) - additional, updatedAt: now };
-              addTransaction(allocation, 'CONSUME', additional, 'Order quantity increased after stock consumption');
-              allocation.consumedQuantity = consumed + additional;
-            }
-          }
-          if (order.status === 'Cancelled' && Number(allocation.reservedQuantity || 0) > 0) {
-            addTransaction(allocation, 'RELEASE', Number(allocation.reservedQuantity), 'Order cancelled');
-            allocation.reservedQuantity = 0;
-            allocation.releasedAt = now;
-          } else if (order.status !== 'Cancelled' && allocation.trackingMode === 'AUTO' && !allocation.consumedAt &&
-            (STATUS_RANKS[order.status] ?? 0) >= (STATUS_RANKS[allocation.deductStockAt || 'Finishing'] ?? 3)) {
-            allocation = consumeAllocation(allocation);
-          }
-          nextAllocations.push(allocation);
-        });
-      });
-
-      previousAllocations.filter(allocation => !nextItemIds.has(allocation.orderItemId)).forEach(allocation => {
-        if (allocation.consumedAt) { nextAllocations.push(allocation); return; }
-        const reserved = Math.max(0, Number(allocation.reservedQuantity || 0));
-        if (reserved) addTransaction(allocation, 'RELEASE', reserved, order.status === 'Cancelled' ? 'Order cancelled' : 'Order item removed');
-      });
-
-      this._stockCache = stock;
-      this._stockTxnCache = transactions;
-      fetch('/api/stock/bulk', {
+    // The server checks the PIN and saves the order, stock quantities and RESTORE movements together.
+    async restoreOrderStock(orderId, pin) {
+      const order = this.getOrders().find(entry => entry.id === orderId);
+      if (!order) return undefined;
+      const syncId = order._id || order.id;
+      const res = await fetch(`/api/orders/${encodeURIComponent(syncId)}/restore-stock`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stock })
-      }).catch(console.warn);
-      if (transactions.length > 0) {
-        fetch('/api/stock-transactions/bulk', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ transactions: transactions.slice(0, 10) })
-        }).catch(console.warn);
+        body: JSON.stringify({ pin })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Stock could not be restored. Please try again.');
+      const normalized = this.normalizeOrder(data.order);
+      let merged = { ...order, ...normalized, _listOnly: false };
+      if (Array.isArray(this._orderCache)) {
+        const idx = this._orderCache.findIndex(x => x.id === order.id);
+        if (idx !== -1) {
+          merged = { ...this._orderCache[idx], ...normalized, _listOnly: false };
+          this._orderCache[idx] = merged;
+        }
       }
-
-      return { ...order, stockAllocations: nextAllocations, stockUpdatedAt: now };
+      if (data.stockChanged) this._refreshStockFromServer();
+      return { order: merged, restored: data.restored, authorizedBy: data.authorizedBy };
     },
 
-    restoreOrderStock(orderId, authorizedUser = 'Authorized inventory user') {
-      return this._withStockLock(() => {
-        const orders = this.getOrders();
-        const index = orders.findIndex(order => order.id === orderId);
-        if (index < 0) return undefined;
-        const stock = this.getStock();
-        const transactions = this.getStockTransactions();
-        const now = new Date().toISOString();
-        let restored = 0;
-        const allocations = (orders[index].stockAllocations || []).map(allocation => {
-          const amount = allocation.restoredAt ? 0 : Math.max(0, Number(allocation.consumedQuantity || 0));
-          if (!amount) return allocation;
-          const stockIndex = stock.findIndex(item => item.id === allocation.inventoryItemId);
-          if (stockIndex >= 0) stock[stockIndex] = { ...stock[stockIndex], quantity: Number(stock[stockIndex].quantity || 0) + amount, updatedAt: now };
-          transactions.unshift({ id: createId('stocktxn'), inventoryItemId: allocation.inventoryItemId, inventoryItemName: allocation.inventoryItemName, quantity: amount, signedQuantity: amount, unit: allocation.unit, transactionType: 'RESTORE', orderId: orders[index].id, orderNumber: orders[index].orderNumber, masterProductId: allocation.masterProductId, masterProductName: allocation.masterProductName, orderItemId: allocation.orderItemId, timestamp: now, user: authorizedUser, automatic: false, reason: 'Explicit stock restore after cancellation' });
-          restored += amount;
-          return { ...allocation, restoredAt: now, restoredQuantity: amount };
-        });
-        orders[index] = { ...orders[index], stockAllocations: allocations, stockRestoredAt: now, updatedAt: now };
-        this._stockCache = stock;
-        this._stockTxnCache = transactions;
-        this._orderCache = orders;
-        fetch('/api/stock/bulk', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ stock })
-        }).catch(console.warn);
-        fetch('/api/stock-transactions/bulk', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ transactions: transactions.slice(0, 10) })
-        }).catch(console.warn);
-        const syncId = orders[index]._id || orders[index].id;
-        fetch(`/api/orders/${syncId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(orders[index])
-        }).catch(console.warn);
-        return { order: orders[index], restored };
-      });
+    /** The repeat jobs made from an order, newest first. */
+    async getOrderRepeats(order) {
+      const syncId = order?._id || order?.id;
+      if (!syncId) return [];
+      const res = await fetch(`/api/orders/${encodeURIComponent(syncId)}/repeats`);
+      if (!res.ok) throw new Error(`Unable to load repeat jobs (HTTP ${res.status}).`);
+      const data = await res.json().catch(() => ({}));
+      return (Array.isArray(data.repeats) ? data.repeats : []).map(raw => this.normalizeOrder(raw));
     },
 
     async saveStockItem(item) {
@@ -7668,7 +7652,7 @@
         if (res.ok) {
           const json = await res.json();
           const items = Array.isArray(json.orders) ? json.orders : (Array.isArray(json) ? json : []);
-          this._orderCache = items.map(raw => this.normalizeOrder(raw));
+          this._orderCache = items.map(raw => ({ ...this.normalizeOrder(raw), _listOnly: true }));
         } else {
           if (!this._orderCache) this._orderCache = [];
         }
@@ -7730,77 +7714,52 @@
     createDeliveryChalanPdf(order = {}) {
       return createReferenceChalanPdf(this, order);
     },
-    saveOrder(o) {
+    saveOrder(input, options = {}) {
+      // Display-only fields (for example _dueMs / _diffMs from the dashboard's "Needing Attention"
+      // cards) are never stored or sent; the database has no such columns.
+      let o = {};
+      for (const [key, value] of Object.entries(input || {})) {
+        if (!key.startsWith('_') || key === '_id') o[key] = value;
+      }
+      // New orders are only created through createOrder(), after the server confirms them.
+      if (!o.id && !o._id) {
+        throw new Error('New orders must be created with storageService.createOrder().');
+      }
       const list = this.getOrders();
       const now = new Date().toISOString();
       let previousOrder = null;
       let targetOrder = null;
 
-      if (o.id || o._id) {
-        const targetId = o.id || o._id;
-        const idx = list.findIndex(x => x.id === targetId || x._id === targetId || (x.orderNumber && x.orderNumber === o.orderNumber));
-        if (idx !== -1) {
-          const previous = list[idx];
-          previousOrder = previous;
-          const history = Array.isArray(previous.history) ? [...previous.history] : [];
-          if (o.status && o.status !== previous.status) history.push({ status: o.status, timestamp: now });
-          targetOrder = { ...previous, ...o, history, updatedAt: now };
-          targetOrder = this._withStockLock(() => {
-            const reconciled = this._reconcileOrderStock(targetOrder, previousOrder);
-            list[idx] = reconciled;
-            this._orderCache = list;
-            localStorage.removeItem(STORAGE_KEYS.STOCK_COMMIT);
-            return reconciled;
-          });
-        } else {
-          o.createdAt = o.createdAt || now;
-          o.updatedAt = now;
-          o.history = Array.isArray(o.history) && o.history.length ? o.history : [{ status: o.status || 'New', timestamp: now }];
-          targetOrder = this._withStockLock(() => {
-            const reconciled = this._reconcileOrderStock(o, null);
-            list.unshift(reconciled);
-            this._orderCache = list;
-            localStorage.removeItem(STORAGE_KEYS.STOCK_COMMIT);
-            return reconciled;
-          });
-        }
+      const targetId = o.id || o._id;
+      const idx = list.findIndex(x => x.id === targetId || x._id === targetId || (x.orderNumber && x.orderNumber === o.orderNumber));
+      if (idx !== -1) {
+        const previous = list[idx];
+        previousOrder = previous;
+        const history = Array.isArray(previous.history) ? [...previous.history] : [];
+        if (o.status && o.status !== previous.status) history.push({ status: o.status, timestamp: now });
+        // Stock for the order is calculated and saved by the server together with the order.
+        targetOrder = { ...previous, ...o, history, updatedAt: now };
+        list[idx] = targetOrder;
+        this._orderCache = list;
       } else {
-        const clientOrdId = createId('ord');
-        o = { ...o, id: clientOrdId, localId: clientOrdId };
-        o.orderNumber = o.orderNumber || this.generateNextOrderNumber();
-        o.createdAt = now;
-        o.updatedAt = now;
-        o.history = [{ status: o.status || 'New', timestamp: now }];
-        targetOrder = this._withStockLock(() => {
-          const reconciled = this._reconcileOrderStock(o, null);
-          list.unshift(reconciled);
-          this._orderCache = list;
-          localStorage.removeItem(STORAGE_KEYS.STOCK_COMMIT);
-          return reconciled;
-        });
+        // Only reached for an order the server has just confirmed (see createOrder).
+        o.createdAt = o.createdAt || now;
+        o.updatedAt = o.updatedAt || now;
+        o.history = Array.isArray(o.history) && o.history.length ? o.history : [{ status: o.status || 'New', timestamp: now }];
+        targetOrder = o;
+        list.unshift(targetOrder);
+        this._orderCache = list;
       }
+
+      // createOrder() has already saved the order on the server; only this device's list needed updating.
+      if (options.localOnly) return targetOrder;
 
       // Sync to database
-      const syncId = targetOrder._id || (targetOrder.id && !String(targetOrder.id).startsWith('ord-') ? targetOrder.id : null);
-      const isNew = !syncId;
-      const url = isNew ? '/api/orders' : `/api/orders/${syncId}`;
-      const method = isNew ? 'POST' : 'PUT';
+      const syncId = targetOrder._id || targetOrder.id;
+      const payload = this._orderPayloadForServer(targetOrder);
 
-      const payload = { ...targetOrder };
-      delete payload.itemSummary;
-      delete payload.item_summary;
-      delete payload.mediaCount;
-      delete payload.media_count;
-      if (isNew && targetOrder.id && String(targetOrder.id).startsWith('ord-')) {
-        payload.localId = targetOrder.id;
-      }
-      if (isNew) {
-        delete payload._id;
-        delete payload.id;
-      }
-
-      fetch(url, {
-        method,
+      fetch(`/api/orders/${syncId}`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...this.getAuthHeaders() },
         body: JSON.stringify(payload)
       })
@@ -7818,13 +7777,13 @@
               const foundIdx = this._orderCache.findIndex(x =>
                 (normalized._id && x._id === normalized._id) ||
                 (normalized.id && x.id === normalized.id) ||
-                (normalized.localId && (x.localId === normalized.localId || x.id === normalized.localId)) ||
-                (normalized.orderNumber && x.orderNumber === normalized.orderNumber)
+                (normalized.localId && (x.localId === normalized.localId || x.id === normalized.localId))
               );
               if (foundIdx !== -1) {
-                this._orderCache[foundIdx] = { ...this._orderCache[foundIdx], ...normalized };
+                this._orderCache[foundIdx] = { ...this._orderCache[foundIdx], ...normalized, _listOnly: false };
               }
             }
+            if (saved.stockChanged) this._refreshStockFromServer();
           }
         })
         .catch(err => {
@@ -7832,6 +7791,7 @@
           if (typeof window !== 'undefined' && window.alert) {
             const isOffline = (typeof navigator !== 'undefined' && !navigator.onLine) || /failed to fetch|networkerror|econnrefused/i.test(err.message || '');
             if (isOffline) {
+              connectionMonitor.check();
               window.alert('Backend is offline. Unable to reach server. Please check your network connection.');
             } else {
               window.alert(err.message || 'Unable to save order to database.');
@@ -7841,6 +7801,100 @@
 
       return targetOrder;
     },
+    /**
+     * Creates a new order on the server. The order is added to this device's list only after the
+     * server confirms it and assigns its job number. Nothing is kept on the device if the server
+     * cannot be reached or rejects the order. Throws an Error with a message for the user.
+     */
+    /** What to send when saving an order. Slim list orders never send placeholder media or partial history. */
+    _orderPayloadForServer(order) {
+      const payload = { ...order };
+      delete payload.itemSummary;
+      delete payload.item_summary;
+      delete payload.mediaCount;
+      delete payload.media_count;
+      delete payload.stockAllocations;
+      delete payload.stockUpdatedAt;
+      delete payload.stockChanged;
+      if (order._listOnly) delete payload.history;
+      return payload;
+    },
+    /** Reloads stock and stock movements after the server has changed them. */
+    _refreshStockFromServer() {
+      Promise.all([this.loadStockFromServer(), this.loadStockTransactionsFromServer()]).catch(() => { });
+    },
+    async createOrder(data) {
+      const now = new Date().toISOString();
+      const payload = {};
+      for (const [key, value] of Object.entries(data || {})) {
+        if (!key.startsWith('_')) payload[key] = value;
+      }
+      delete payload.id;
+      delete payload.orderNumber;
+      delete payload.invoiceNumber;
+      payload.localId = createId('ord');
+      payload.createdAt = now;
+      payload.updatedAt = now;
+      payload.history = [{ status: payload.status || 'New', timestamp: now }];
+
+      // One immediate retry with the same localId covers a reply that was lost on the way back:
+      // the server returns the order it already created for a repeated localId, so no duplicate.
+      let res = null;
+      for (let attempt = 0; attempt < 2 && !res; attempt++) {
+        try {
+          res = await fetch('/api/orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...this.getAuthHeaders() },
+            body: JSON.stringify(payload)
+          });
+        } catch (_) {
+          if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 700));
+        }
+      }
+      if (!res) {
+        connectionMonitor.check();
+        throw new Error(ORDER_NOT_SAVED_MESSAGE);
+      }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body || !(body._id || body.id)) {
+        if (res.status === 503) connectionMonitor.check();
+        throw new Error(res.status === 503 ? ORDER_NOT_SAVED_MESSAGE : (body.error || `Unable to save the order (HTTP ${res.status}).`));
+      }
+      const saved = this.saveOrder(this.normalizeOrder(body), { localOnly: true });
+      if (body.stockChanged) this._refreshStockFromServer();
+      if (typeof window !== 'undefined' && window.__pgDebouncedRefresh) window.__pgDebouncedRefresh();
+      return saved;
+    },
+    /**
+     * Asks the server for the invoice number of one order, or of several orders billed together.
+     * The server allocates it atomically (or returns the existing one), so it is safe to retry.
+     */
+    async assignInvoiceNumber(orderIds) {
+      const ids = (orderIds || []).map(v => String(v || '').trim()).filter(Boolean);
+      let res;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          res = await fetch('/api/orders/invoice-number', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...this.getAuthHeaders() },
+            body: JSON.stringify({ orderIds: ids })
+          });
+          break;
+        } catch (err) {
+          if (!(err instanceof TypeError) || attempt >= 1) throw new Error('Unable to reach the server to get an invoice number. Please check your connection and try again.');
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.invoiceNumber) throw new Error(data.error || `Unable to get an invoice number (HTTP ${res.status}).`);
+      if (Array.isArray(this._orderCache)) {
+        for (const saved of data.orders || []) {
+          const idx = this._orderCache.findIndex(x => x._id === saved._id || x.id === saved._id || (saved.localId && (x.localId === saved.localId || x.id === saved.localId)));
+          if (idx !== -1) this._orderCache[idx] = { ...this._orderCache[idx], invoiceNumber: data.invoiceNumber };
+        }
+      }
+      return data.invoiceNumber;
+    },
     deleteOrder(id) {
       const orders = this.getOrders();
       const target = orders.find(order => order.id === id || order._id === id);
@@ -7848,10 +7902,6 @@
       if (target?.media?.length) mediaStore.removeMany(target.media.map(item => item.id)).catch(error => console.warn('Unable to remove order media.', error));
       const remaining = orders.filter(order => order.id !== id && order._id !== id);
       this._orderCache = remaining;
-      this._withStockLock(() => {
-        if (target) this._reconcileOrderStock({ ...target, items: [] }, target);
-        localStorage.removeItem(STORAGE_KEYS.STOCK_COMMIT);
-      });
       fetch(`/api/orders/${targetId}`, { method: 'DELETE' }).catch(err => {
         console.error('Backend offline: Failed to delete order from database:', err);
         if (typeof window !== 'undefined' && window.alert) {
@@ -7860,11 +7910,14 @@
       });
       return remaining;
     },
-    updateOrderStatus(id, status, paymentMethod, teamMember) {
+    // `changes` (optional) are other order fields saved in the SAME request as the status, so a
+    // separate earlier save can never arrive last and put the old status back.
+    updateOrderStatus(id, status, paymentMethod, teamMember, changes) {
       const list = this.getOrders();
       const idx = list.findIndex(x => x.id === id || x._id === id);
       if (idx === -1) return undefined;
       const previousOrder = { ...list[idx], stockAllocations: (list[idx].stockAllocations || []).map(allocation => ({ ...allocation })) };
+      if (changes && typeof changes === 'object') Object.assign(list[idx], changes);
       list[idx].status = status;
       if (paymentMethod !== undefined) list[idx].paymentMethod = paymentMethod;
       if (teamMember) {
@@ -7879,19 +7932,10 @@
       if (history.at(-1)?.status !== status) history.push({ status, timestamp: now });
       list[idx].history = history;
       list[idx].updatedAt = now;
-      list[idx] = this._withStockLock(() => {
-        const reconciled = this._reconcileOrderStock(list[idx], previousOrder);
-        list[idx] = reconciled;
-        this._orderCache = list;
-        localStorage.removeItem(STORAGE_KEYS.STOCK_COMMIT);
-        return reconciled;
-      });
+      // Stock is calculated and saved by the server together with the status change.
+      this._orderCache = list;
       const syncId = list[idx]._id || list[idx].id;
-      const syncPayload = { ...list[idx] };
-      delete syncPayload.itemSummary;
-      delete syncPayload.item_summary;
-      delete syncPayload.mediaCount;
-      delete syncPayload.media_count;
+      const syncPayload = this._orderPayloadForServer(list[idx]);
       fetch(`/api/orders/${syncId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...this.getAuthHeaders() },
@@ -7900,6 +7944,14 @@
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.error || `HTTP ${res.status}`);
+        }
+        const saved = await res.json().catch(() => null);
+        if (saved && (saved._id || saved.id) && Array.isArray(this._orderCache)) {
+          const normalized = this.normalizeOrder(saved);
+          const cachedIdx = this._orderCache.findIndex(x => x._id === normalized._id || x.id === normalized.id);
+          if (cachedIdx !== -1) this._orderCache[cachedIdx] = { ...this._orderCache[cachedIdx], ...normalized, _listOnly: false };
+          if (saved.stockChanged) this._refreshStockFromServer();
+          if (typeof window !== 'undefined' && window.__pgDebouncedRefresh) window.__pgDebouncedRefresh();
         }
       }).catch(err => {
         console.error('Failed to sync order status to database:', err);
@@ -8256,7 +8308,7 @@
     return h("span", {
       className: `inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border shadow-2xs ${styles[status] || styles['Ready'] || styles['New']}`
     }, [
-      h("span", { key: "ic", className: "text-xs" }, icons[status] || '•'),
+      h("span", { key: "ic", className: "inline-block w-1.5 h-1.5 rounded-full bg-current opacity-70 shrink-0", "aria-hidden": "true" }),
       status === 'Finishing' ? 'Progress' : status
     ]);
   };
@@ -8296,7 +8348,7 @@
         }, [
           h("span", { className: "text-xs text-rose-500 font-bold" }, "✕"),
           h("span", {}, "Cancelled (Dead)"),
-          h("span", { className: "text-[10px] text-slate-400" }, "🔒")
+          h(Icon, { name: "lock", className: "w-3 h-3 text-slate-400" })
         ])
       ]);
     }
@@ -8372,6 +8424,8 @@
     }, [isOpen]);
 
     const isOptionDisabled = (opt) => {
+      // A Mistake order is closed: every status option is locked.
+      if (order.status === 'Mistake') return true;
       if (opt.value === 'New') return isDoneOrLater;
       if (opt.value === 'In Design') return isDoneOrLater || futureStageDisabled('In Design');
       if (opt.value === 'Printing') return isDoneOrLater || futureStageDisabled('Printing');
@@ -8432,7 +8486,7 @@
               }`
           }, [
             h("div", { className: "flex items-center gap-2 min-w-0" }, [
-              h("span", { className: "text-sm shrink-0" }, opt.icon),
+              h("span", { className: "inline-block w-1.5 h-1.5 rounded-full bg-current opacity-70 shrink-0", "aria-hidden": "true" }),
               h("span", { className: "truncate" }, opt.label)
             ]),
             isSelected && h("span", { className: "text-xs font-black shrink-0 text-white" }, "✓"),
@@ -8458,7 +8512,7 @@
               }`
           }, [
             h("div", { className: "flex items-center gap-2 min-w-0" }, [
-              h("span", { className: "text-sm shrink-0" }, opt.icon),
+              h("span", { className: "inline-block w-1.5 h-1.5 rounded-full bg-current opacity-70 shrink-0", "aria-hidden": "true" }),
               h("span", { className: "truncate" }, opt.label)
             ]),
             isSelected && h("span", { className: "text-xs font-black shrink-0 text-white" }, "✓"),
@@ -8486,7 +8540,7 @@
               }`
           }, [
             h("div", { className: "flex items-center gap-2 min-w-0" }, [
-              h("span", { className: "text-sm shrink-0" }, opt.icon),
+              h("span", { className: "inline-block w-1.5 h-1.5 rounded-full bg-current opacity-70 shrink-0", "aria-hidden": "true" }),
               h("span", { className: "truncate" }, opt.actionLabel || opt.label)
             ]),
             isSelected && h("span", { className: "text-xs font-black shrink-0 text-white" }, "✓"),
@@ -8509,7 +8563,7 @@
           } ${isOpen ? 'ring-2 ring-indigo-400/40 shadow-sm scale-[0.98]' : 'hover:shadow-xs hover:scale-[1.02]'}`
         , onKeyDown: event => { if (['ArrowDown', 'Enter', ' '].includes(event.key) && !isOpen) { event.preventDefault(); setIsOpen(true); requestAnimationFrame(() => menuRef.current?.querySelector('button:not(:disabled)')?.focus()); } }
       }, [
-        h("span", { className: "text-xs shrink-0" }, currentOption.icon),
+        h("span", { className: "inline-block w-1.5 h-1.5 rounded-full bg-current opacity-70 shrink-0", "aria-hidden": "true" }),
         h("span", { className: "truncate max-w-[95px]" }, currentOption.label),
         h(Icon, {
           name: "chevronDown",
@@ -9203,10 +9257,10 @@
         ]),
         h('nav', { className: 'flex overflow-x-auto px-2' }, [['numbering', 'Numbering'], ['bill', 'Bill Design'], ['chalan', 'Chalan Design']].map(([id, label]) => h('button', { key: id, type: 'button', onClick: () => { setTab(id); setError(''); }, className: `min-w-[120px] border-b-2 px-4 py-3 text-xs font-black ${tab === id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-400'}` }, label)))
       ]),
-      tab === 'numbering' ? h('form', { className: 'mx-auto grid max-w-3xl gap-4 p-5 sm:grid-cols-2', onSubmit: e => { e.preventDefault(); const f = e.currentTarget; storageService.saveSettings({ ...storageService.getSettings(), invoicePrefix: '', invoiceStartNumber: Math.max(1, parseInt(f.invoiceStartNumber.value, 10) || 1), jobPrefix: f.jobPrefix.value.trim() || 'JOB-', jobStartNumber: Math.max(1, parseInt(f.jobStartNumber.value, 10) || 1) }); onSaved?.('✓ Numbering settings saved.'); } }, [
-        h('label', { className: labelClass }, ['Invoice starting number (Where to start)', h('input', { name: 'invoiceStartNumber', type: 'number', min: 1, defaultValue: fresh.invoiceStartNumber || 1042, className: `${inputClass} mt-1.5` }), h('span', { className: 'mt-1 block text-[10px] text-slate-400 font-normal' }, 'Invoices are pure numbers (no prefix). Starting number sets where invoice numbers begin.')]),
-        h('label', { className: labelClass }, ['Job prefix', h('input', { name: 'jobPrefix', defaultValue: fresh.jobPrefix || 'JOB-', className: `${inputClass} mt-1.5` }), h('span', { className: 'mt-1 block text-[10px] text-slate-400 font-normal' }, 'Prefix for order and job numbers.')]),
-        h('label', { className: labelClass }, ['Job starting number (Where to start)', h('input', { name: 'jobStartNumber', type: 'number', min: 1, defaultValue: fresh.jobStartNumber || 1042, className: `${inputClass} mt-1.5` }), h('span', { className: 'mt-1 block text-[10px] text-slate-400 font-normal' }, 'Starting number where job numbers begin.')]),
+      tab === 'numbering' ? h('form', { className: 'mx-auto grid max-w-3xl gap-4 p-5 sm:grid-cols-2', onSubmit: e => { e.preventDefault(); const f = e.currentTarget; storageService.saveSettings({ ...storageService.getSettings(), invoicePrefix: '', invoiceStartNumber: Math.max(1, parseInt(f.invoiceStartNumber.value, 10) || 1), jobPrefix: f.jobPrefix.value.trim() || 'JOB-', jobStartNumber: Math.max(1, parseInt(f.jobStartNumber.value, 10) || 1), lockJobNumbering: true, lockInvoiceNumbering: true }); onSaved?.('✓ Numbering settings saved.'); } }, [
+        h('label', { className: labelClass }, ['Invoice starting number (Where to start)', h('input', { name: 'invoiceStartNumber', type: 'number', min: 1, defaultValue: fresh.invoiceStartNumber || 1042, readOnly: Boolean(fresh.invoiceNumberingLocked), 'aria-readonly': Boolean(fresh.invoiceNumberingLocked), className: `${inputClass} mt-1.5${fresh.invoiceNumberingLocked ? ' bg-slate-100 text-slate-500 cursor-not-allowed' : ''}` }), h('span', { className: 'mt-1 block text-[10px] text-slate-400 font-normal' }, fresh.invoiceNumberingLocked ? 'Locked after first setup. Ask the platform developer to unlock it.' : 'Invoices are pure numbers (no prefix). Starting number sets where invoice numbers begin. You can set this once.')]),
+        h('label', { className: labelClass }, ['Job prefix', h('input', { name: 'jobPrefix', defaultValue: fresh.jobPrefix || 'JOB-', readOnly: Boolean(fresh.jobNumberingLocked), 'aria-readonly': Boolean(fresh.jobNumberingLocked), className: `${inputClass} mt-1.5${fresh.jobNumberingLocked ? ' bg-slate-100 text-slate-500 cursor-not-allowed' : ''}` }), h('span', { className: 'mt-1 block text-[10px] text-slate-400 font-normal' }, fresh.jobNumberingLocked ? 'Locked after first setup. Ask the platform developer to unlock it.' : 'Prefix for order and job numbers. You can set this once.')]),
+        h('label', { className: labelClass }, ['Job starting number (Where to start)', h('input', { name: 'jobStartNumber', type: 'number', min: 1, defaultValue: fresh.jobStartNumber || 1042, readOnly: Boolean(fresh.jobNumberingLocked), 'aria-readonly': Boolean(fresh.jobNumberingLocked), className: `${inputClass} mt-1.5${fresh.jobNumberingLocked ? ' bg-slate-100 text-slate-500 cursor-not-allowed' : ''}` }), h('span', { className: 'mt-1 block text-[10px] text-slate-400 font-normal' }, fresh.jobNumberingLocked ? 'Locked after first setup. Ask the platform developer to unlock it.' : 'Starting number where job numbers begin. You can set this once.')]),
         h('div', { className: 'rounded-2xl border border-indigo-100 bg-indigo-50 p-4' }, [h('div', { className: 'text-[9px] font-black uppercase text-indigo-500' }, 'Next invoice (Pure Number)'), h('div', { className: 'mt-1 font-mono text-lg font-black text-indigo-800' }, storageService.generateNextInvoiceNumber())]),
         h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4' }, [h('div', { className: 'text-[9px] font-black uppercase text-slate-400' }, 'Next job'), h('div', { className: 'mt-1 font-mono text-lg font-black text-slate-800' }, storageService.generateNextOrderNumber())]),
         h('div', { className: 'sm:col-span-2 flex justify-end' }, h('button', { type: 'submit', className: 'rounded-xl bg-slate-900 px-5 py-2.5 text-xs font-black text-white cursor-pointer' }, 'Save Numbering'))
@@ -9577,6 +9631,15 @@
       setActiveTabState(tab);
     };
     const [appAlert, setAppAlert] = useState(null);
+    // "System offline" popup: shown while the server is unreachable. It cannot be dismissed; it closes
+    // by itself as soon as the server is reachable again.
+    const [systemOfflinePopup, setSystemOfflinePopup] = useState(!connectionMonitor.online);
+    useEffect(() => {
+      const unsubscribe = connectionMonitor.subscribe(isOnline => setSystemOfflinePopup(!isOnline));
+      connectionMonitor.start();
+      connectionMonitor.check();
+      return unsubscribe;
+    }, []);
     const [selectedCustomer, setSelectedCustomer] = useState(null);
     const [selectedTeam, setSelectedTeam] = useState(null);
     const [selectedOrder, setSelectedOrder] = useState(null);
@@ -9693,6 +9756,10 @@
     const [supportNotifications, setSupportNotifications] = useState([]);
     const [dismissingNotifId, setDismissingNotifId] = useState(null);
     const [isNewOrderModalOpen, setIsNewOrderModalOpen] = useState(false);
+    // Repeat job: setup popup state, the old job the open New Order form repeats, and the repeats of the open order.
+    const [repeatSetup, setRepeatSetup] = useState(null);
+    const [newOrderRepeatOf, setNewOrderRepeatOf] = useState(null);
+    const [selectedOrderRepeats, setSelectedOrderRepeats] = useState([]);
     const [newOrderCustomerId, setNewOrderCustomerId] = useState('');
     const [newOrderProductId, setNewOrderProductId] = useState('');
     const [newOrderProductScopeId, setNewOrderProductScopeId] = useState('');
@@ -9730,8 +9797,6 @@
     const [paymentPendingOrder, setPaymentPendingOrder] = useState(null);
     const [paymentCollection, setPaymentCollection] = useState({ method: '', amount: '', error: '' });
     const [designerPendingOrder, setDesignerPendingOrder] = useState(null);
-    const [printingGateJobNumber, setPrintingGateJobNumber] = useState('');
-    const [printingGateFiles, setPrintingGateFiles] = useState([]);
     const [printingGateQuantities, setPrintingGateQuantities] = useState({});
     const [printingGateGroupBreakdowns, setPrintingGateGroupBreakdowns] = useState({});
     const [printingGateError, setPrintingGateError] = useState('');
@@ -9894,6 +9959,7 @@
       if (backwardPendingTransition) { setBackwardPendingTransition(null); return true; }
       if (mistakePendingOrder) { setMistakePendingOrder(null); return true; }
       if (downloadPendingPrint) { setDownloadPendingPrint(null); return true; }
+      if (repeatSetup) { setRepeatSetup(null); return true; }
       if (isNewOrderModalOpen) { setIsNewOrderModalOpen(false); return true; }
       if (isCustomerModalOpen) { setIsCustomerModalOpen(false); setEditingCustomer(null); return true; }
       if (isProductModalOpen) { setIsProductModalOpen(false); setEditingProduct(null); return true; }
@@ -9918,7 +9984,7 @@
       appAlert || pdfPreviewModal || clientReceiptPreview || clientPaymentDetails ||
       clientStatementModal || expenseReceiptPreview || expensePaymentModal || financialExpenseDetails ||
       financialExportModal || teamPinModal || paymentPendingOrder || mistakePendingOrder ||
-      designerPendingOrder || deliveryPendingOrder || pickupPendingOrder || isNewOrderModalOpen ||
+      designerPendingOrder || deliveryPendingOrder || pickupPendingOrder || repeatSetup || isNewOrderModalOpen ||
       isCustomerModalOpen || isProductModalOpen || isExpenseModalOpen || isVendorModalOpen ||
       isAddStockOpen || selectedStockProductId || isAddProductModalOpen || isShortcutsOpen || isReminderPanelOpen ||
       isMobileMenuOpen || selectedOrder || selectedTeam || selectedVendor || selectedCustomer ||
@@ -9932,7 +9998,7 @@
         Boolean(pdfPreviewModal), Boolean(clientReceiptPreview), Boolean(clientPaymentDetails),
         Boolean(clientStatementModal), Boolean(expenseReceiptPreview),
         Boolean(expensePaymentModal), Boolean(financialExpenseDetails), Boolean(financialExportModal),
-        Boolean(isNewOrderModalOpen), Boolean(isCustomerModalOpen),
+        Boolean(repeatSetup), Boolean(isNewOrderModalOpen), Boolean(isCustomerModalOpen),
         Boolean(isProductModalOpen), Boolean(isExpenseModalOpen), Boolean(isVendorModalOpen),
         Boolean(isAddStockOpen), Boolean(selectedStockProductId), Boolean(selectedOrder), Boolean(selectedTeam), Boolean(selectedVendor),
         Boolean(selectedCustomer), Boolean(profileTopic), activeTab
@@ -10251,6 +10317,15 @@
           .catch(err => console.warn('Failed to load full order details:', err));
       }
     }, [selectedOrder?.id]);
+    useEffect(() => {
+      setSelectedOrderRepeats([]);
+      if (!selectedOrder?.id) return undefined;
+      let active = true;
+      storageService.getOrderRepeats(selectedOrder)
+        .then(list => { if (active) setSelectedOrderRepeats(list); })
+        .catch(err => console.warn('Failed to load repeat jobs:', err));
+      return () => { active = false; };
+    }, [selectedOrder?.id]);
     useEffect(() => () => { if (clientReceiptPreview?.url) URL.revokeObjectURL(clientReceiptPreview.url); }, [clientReceiptPreview?.url]);
 
     const [searchQuery, setSearchQuery] = useState('');
@@ -10440,18 +10515,10 @@
         setClientPaymentModal(current => ({ ...current, error: 'Enter a valid received amount.' }));
         return;
       }
+      if (clientPaymentModal.isSaving) return;
       setClientPaymentModal(current => ({ ...current, isSaving: true, error: '' }));
-      let receipt = null;
-      if (clientPaymentModal.receiptFile) {
-        try {
-          await mediaStore.putMany([clientPaymentModal.receiptFile]);
-          receipt = { id: clientPaymentModal.receiptFile.id, name: clientPaymentModal.receiptFile.name, type: clientPaymentModal.receiptFile.type, size: clientPaymentModal.receiptFile.size };
-        } catch (error) {
-          setClientPaymentModal(current => ({ ...current, isSaving: false, error: error.message || 'Unable to save payment photo.' }));
-          return;
-        }
-      }
-      const result = storageService.recordClientPayment(clientPaymentModal.customer.id, amount, clientPaymentModal.method, clientPaymentModal.note, receipt);
+      // Payment receipts are no longer attached to client payments.
+      const result = storageService.recordClientPayment(clientPaymentModal.customer.id, amount, clientPaymentModal.method, clientPaymentModal.note, null);
       if (!result.ok) {
         setClientPaymentModal(current => ({ ...current, isSaving: false, error: result.error || 'Unable to record payment.' }));
         return;
@@ -10481,7 +10548,7 @@
       setClientReceiptPreview(null);
     };
 
-    const handleExecuteInvoiceAction = (actionOverride) => {
+    const handleExecuteInvoiceAction = async (actionOverride) => {
       if (!invoiceDiscountModal?.order) return;
       const { order, subtotal, discount, documentType = 'bill' } = invoiceDiscountModal;
       const action = actionOverride || invoiceDiscountModal.action || 'ready';
@@ -10494,9 +10561,22 @@
       const cleanDiscount = Math.max(0, Math.min(subtotal, Number(discount) || 0));
       const newTotal = Math.max(0, subtotal - cleanDiscount + Number(order.tax || 0));
 
+      let invoiceNumber = order.invoiceNumber;
+      if (!invoiceNumber) {
+        const billedIds = Array.isArray(order.billingOrderIds) && order.billingOrderIds.length > 1
+          ? order.billingOrderIds
+          : [order._id || order.id];
+        try {
+          invoiceNumber = await storageService.assignInvoiceNumber(billedIds);
+        } catch (err) {
+          alert(err.message || 'Unable to get an invoice number from the server. Please try again.');
+          return;
+        }
+      }
+
       let updatedOrder = {
         ...order,
-        invoiceNumber: order.invoiceNumber || storageService.generateNextInvoiceNumber(),
+        invoiceNumber,
         discount: cleanDiscount,
         totalAmount: newTotal
       };
@@ -10545,6 +10625,7 @@
       setMediaError('');
       setIsMediaDragging(false);
       setNewOrderCustomerId(customerId || '');
+      setNewOrderRepeatOf(null);
       setIsNewOrderModalOpen(true);
     };
     const addMediaFiles = (fileList) => {
@@ -10565,14 +10646,6 @@
     };
     const handleMediaSelection = (event) => {
       addMediaFiles(event.currentTarget.files);
-      event.currentTarget.value = '';
-    };
-    const handlePrintingGateFiles = (event) => {
-      const files = Array.from(event.currentTarget.files || []);
-      const accepted = files.filter(file => ALLOWED_MEDIA_EXTENSIONS.has(getFileExtension(file.name))).map(file => ({ id: createId('media'), file, name: file.name, type: file.type || 'application/octet-stream', size: file.size, extension: getFileExtension(file.name) }));
-      const rejected = files.filter(file => !ALLOWED_MEDIA_EXTENSIONS.has(getFileExtension(file.name)));
-      setPrintingGateFiles(current => [...current, ...accepted]);
-      setPrintingGateError(rejected.length ? `Unsupported file${rejected.length === 1 ? '' : 's'}: ${rejected.map(file => file.name).join(', ')}` : '');
       event.currentTarget.value = '';
     };
     const handleMediaDrop = (event) => {
@@ -10846,31 +10919,87 @@
       refresh();
     };
 
-    const handleDuplicateOrder = (order) => {
+    // Repeat job: the old order stays closed with its bill, payments and stock. A new job copies only
+    // the work details (client, products, quantity, description); dates, money and stock start fresh.
+    const openRepeatOrder = (order) => {
       if (!order) return;
-      const nextOrderNumber = storageService.generateNextOrderNumber();
-      const now = new Date().toISOString();
-      const duplicated = {
-        ...order,
-        id: createId('order'),
-        orderNumber: nextOrderNumber,
-        status: 'In Design',
-        printCount: 0,
-        printedBy: '',
-        printerName: '',
-        printHistory: [],
-        downloadedMediaIds: [],
-        paymentHistory: [],
-        history: [{ status: 'In Design', timestamp: now, note: `Duplicated from ${order.orderNumber}` }],
-        createdAt: now,
-        updatedAt: now,
-        completedAt: undefined
-      };
-      const saved = storageService.saveOrder(duplicated);
       setOrderMoreDropdownOpen(false);
-      setSelectedOrder(saved);
-      refresh();
-      alert(`Order duplicated successfully as ${saved.orderNumber}!`);
+      if (isProductionOrDesignRole) {
+        alert('Access Restricted: Designers and production staff cannot create orders.');
+        return;
+      }
+      if (!storageService.getCustomerById(order.customerId)) {
+        alert(`The client of ${order.orderNumber} no longer exists. Create a new order for an existing client instead.`);
+        return;
+      }
+      const products = storageService.getProducts();
+      const rows = (order.items || []).filter(item => item && item.productName).map((item, index) => {
+        const product = products.find(p => p.id === item.productId);
+        const variants = Array.isArray(product?.variants) ? product.variants.filter(Boolean) : [];
+        const variantMissing = Boolean(product && item.variant && variants.length && !variants.includes(item.variant));
+        const available = Boolean(product) && !variantMissing;
+        return {
+          key: item.id || `repeat-row-${index}`,
+          item,
+          product: available ? product : null,
+          unavailableReason: !product ? 'Product removed from master list' : variantMissing ? `Sub-option "${item.variant}" removed` : '',
+          include: available,
+          quantity: Number(item.quantity) > 0 ? String(item.quantity) : '',
+          oldRate: Math.max(0, Number(item.unitPrice || 0)),
+          currentRate: available ? Math.max(0, Number(storageService.getEffectivePrice(product.id, order.customerId, item.variant).price || 0)) : 0
+        };
+      });
+      setRepeatSetup({ order, designMode: 'same', rateMode: 'current', rows, error: '' });
+    };
+
+    const updateRepeatRow = (key, patch) => setRepeatSetup(current => current && ({
+      ...current,
+      error: '',
+      rows: current.rows.map(row => row.key === key ? { ...row, ...patch } : row)
+    }));
+
+    const continueRepeatOrder = () => {
+      const setup = repeatSetup;
+      if (!setup) return;
+      const chosen = setup.rows.filter(row => row.include && row.product);
+      if (!chosen.length) { setRepeatSetup({ ...setup, error: 'Select at least one product to repeat.' }); return; }
+      const missingQty = chosen.find(row => !(Number(row.quantity) > 0));
+      if (missingQty) { setRepeatSetup({ ...setup, error: `Enter a quantity for ${missingQty.item.productName}.` }); return; }
+
+      const groupIds = {};
+      const items = chosen.map(({ item, product, quantity, oldRate, currentRate }) => {
+        const qty = Number(quantity);
+        // A grouped item's file list adds up to its quantity, so it is kept only when the quantity is unchanged.
+        const breakdown = normalizeFileBreakdown(item.fileBreakdown);
+        const next = {
+          id: createId('draft'),
+          productId: product.id,
+          productName: item.productName,
+          variant: item.variant || '',
+          unit: product.unit || item.unit,
+          itemDescription: item.itemDescription || '',
+          productionType: product.productionType || item.productionType || 'In Store',
+          quantity: qty,
+          unitPrice: setup.rateMode === 'old' ? oldRate : currentRate,
+          defaultPrice: Number(product.variantPrices?.[item.variant] ?? product.defaultPrice),
+          fileBreakdown: breakdown.length && fileBreakdownTotal(breakdown) === qty ? breakdown : [],
+          showFileBreakdownOnClientDocs: item.showFileBreakdownOnClientDocs !== false
+        };
+        if (item.subItemGroupId) {
+          groupIds[item.subItemGroupId] = groupIds[item.subItemGroupId] || createId('subitem-group');
+          next.subItemGroupId = groupIds[item.subItemGroupId];
+          next.subItemGroupName = item.subItemGroupName;
+        }
+        next.lineTotal = storageService.calculateLineTotal(next);
+        return next;
+      });
+
+      const { order, designMode } = setup;
+      setRepeatSetup(null);
+      setSelectedOrder(null);
+      openNewOrder(order.customerId);
+      setNewOrderItems(items);
+      setNewOrderRepeatOf({ orderId: order._id || order.id, orderNumber: order.orderNumber, designMode });
     };
 
     const handleCancelOrder = (order) => {
@@ -11134,7 +11263,7 @@
           setIsAddProductModalOpen(false); setIsAddStockOpen(false); setIsTeamModalOpen(false); setIsWhatsappEditModalOpen(false);
           setIsInvoiceActionModalOpen(false); setIsAddItemToOrderOpen(false); setClientPaymentModal(null); setClientPaymentDetails(null);
           setClientReceiptPreview(null); setClientStatementModal(null); setPdfPreviewModal(null);
-          setDesignerPendingOrder(null); setPrintingGateJobNumber(''); setPrintingGateFiles([]); setPrintingGateError(''); setSelectedDesignerId('');
+          setDesignerPendingOrder(null); setPrintingGateError(''); setSelectedDesignerId('');
           setDeliveryPendingOrder(null); setPickupPendingOrder(null); setPaymentPendingOrder(null);
           return;
         }
@@ -11363,6 +11492,11 @@
         alert(`Order ${current.orderNumber} is cancelled and dead. No further work progress or status changes are permitted.`);
         return;
       }
+      // Mistake is final: once an order is marked as Mistake its status cannot change again.
+      if (current.status === 'Mistake') {
+        if (newStatus !== 'Mistake') alert(`Order ${current.orderNumber} was marked as Mistake and is closed. Its status can no longer be changed.`);
+        return;
+      }
       if (newStatus === current.status || (newStatus === 'Ready' && current.status === 'Done')) return;
 
       if (newStatus === 'Mistake') {
@@ -11442,8 +11576,6 @@
       }
       if (newStatus === 'Printing') {
         if (current.status !== 'Printing') {
-          setPrintingGateJobNumber('');
-          setPrintingGateFiles([]);
           setPrintingGateError('');
           const pendingQtyMap = {};
           const pendingGroupMap = {};
@@ -11551,17 +11683,15 @@
         notes: `${mistakeReason} | Order: ${order.orderNumber}`,
         linkedOrderId: order.id,
         mistakeExpense: true
-      });
+      }).catch(err => alert(`The mistake cost was not saved as an expense: ${err.message || 'please try again.'}`));
       const mistakeLog = `[Marked as Mistake • Cost: ${storageService.formatCurrency(mistakeCost)} • Responsible: ${responsibleName} • Reason: ${mistakeReason}]`;
-      storageService.saveOrder({
-        ...order,
+      const updated = storageService.updateOrderStatus(order.id, 'Mistake', undefined, undefined, {
         notes: order.notes ? `${order.notes}\n${mistakeLog}` : mistakeLog,
         mistakeAt: now,
         mistakeCost,
         mistakeReason,
         mistakeBy: responsibleName
       });
-      const updated = storageService.updateOrderStatus(order.id, 'Mistake');
       if (selectedOrder?.id === order.id && updated) setSelectedOrder(updated);
       setMistakePendingOrder(null);
       refresh();
@@ -11583,9 +11713,7 @@
         const rollbackLog = `[Stage Reverted from ${fromDisplay} to ${displayStatus} • Mistake by: ${responsibleName} • Reason: ${reason.trim()}]`;
 
         const existingNotes = order.notes ? `${order.notes}\n${rollbackLog}` : rollbackLog;
-        storageService.saveOrder({ ...order, notes: existingNotes });
-
-        const updated = storageService.updateOrderStatus(order.id, targetStatus);
+        const updated = storageService.updateOrderStatus(order.id, targetStatus, undefined, undefined, { notes: existingNotes });
         if (updated) {
           if (sendWhatsApp) {
             storageService.sendWhatsAppStatusUpdate(updated, displayStatus);
@@ -11621,24 +11749,6 @@
         setPrintingGateError('Please add and select a designer in Profile → Team before upgrading to Printing.');
         return;
       }
-      const entered = printingGateJobNumber.trim().toUpperCase();
-      const target = String(designerPendingOrder.orderNumber || '').trim().toUpperCase();
-      const hasEnteredJobNumber = entered.length > 0;
-      const isJobNumberMatch = hasEnteredJobNumber && entered === target;
-
-      if (hasEnteredJobNumber && !isJobNumberMatch) {
-        setPrintingGateError(`Job Number does not match. Enter ${designerPendingOrder.orderNumber} or attach a design file.`);
-        return;
-      }
-
-      const existingDesignFiles = (designerPendingOrder.media || []).filter(m => m.category === 'Ready to Go');
-      const hasDesignFiles = existingDesignFiles.length > 0 || printingGateFiles.length > 0;
-
-      if (!hasDesignFiles && !isJobNumberMatch) {
-        setPrintingGateError(`Please either enter the exact Job Number (${designerPendingOrder.orderNumber}) OR upload a design file into Ready to Go.`);
-        return;
-      }
-
       // Validate pending quantities (Know After Design). A pending item can be
       // finalized as one quantity or as a grouped set of file/design quantities.
       const pendingItems = (designerPendingOrder.items || []).filter(item => item.knowAfterDesign || item.quantity === 0);
@@ -11665,7 +11775,9 @@
       }
 
       const executeUpgrade = async () => {
-        let preparedOrder = designerPendingOrder;
+        const preparedOrder = designerPendingOrder;
+        // Final quantities and new design files are saved together with the status change.
+        const changes = {};
         if (pendingItems.length > 0) {
           const updatedItems = (designerPendingOrder.items || []).map(item => {
             if (item.knowAfterDesign || item.quantity === 0) {
@@ -11685,36 +11797,16 @@
             return item;
           });
           const recalculatedTotal = updatedItems.reduce((sum, it) => sum + Number(it.lineTotal || 0), 0);
-          preparedOrder = storageService.saveOrder({ ...preparedOrder, items: updatedItems, totalAmount: recalculatedTotal });
+          changes.items = updatedItems;
+          changes.totalAmount = recalculatedTotal;
         }
 
-        if (printingGateFiles.length) {
-          try {
-            await mediaStore.putMany(printingGateFiles);
-            const newMedia = printingGateFiles.map(({ id, name, type, size, extension }) => ({
-              id,
-              name,
-              type,
-              size,
-              extension,
-              category: 'Ready to Go',
-              uploadedBy: chosenMember?.name || 'Designer',
-              uploadedAt: new Date().toISOString()
-            }));
-            preparedOrder = storageService.saveOrder({ ...preparedOrder, media: [...(preparedOrder.media || []), ...newMedia] });
-          } catch (error) {
-            setPrintingGateError(error.message || 'Unable to save the design file.');
-            return;
-          }
-        }
-        const updated = storageService.updateOrderStatus(preparedOrder.id, 'Printing', undefined, chosenMember);
+        const updated = storageService.updateOrderStatus(preparedOrder.id, 'Printing', undefined, chosenMember, changes);
         if (updated) {
           if (selectedOrder?.id === updated.id) setSelectedOrder(updated);
           storageService.sendWhatsAppStatusUpdate(updated, 'Printing');
         }
         setDesignerPendingOrder(null);
-        setPrintingGateJobNumber('');
-        setPrintingGateFiles([]);
         setPrintingGateQuantities({});
         setPrintingGateGroupBreakdowns({});
         setPrintingGateError('');
@@ -13913,12 +14005,12 @@
 
         (orderDateFilter === 'TODAY' || expandedOrderHistoryMonth) && h("div", { className: "flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none" }, [
           { id: 'ALL', label: `All Orders (${dateScopedOrders.length})` },
-          { id: 'New', label: `✨ New (${dateScopedOrders.filter(o => o.status === 'New').length})` },
-          { id: 'In Design', label: `🎨 1. In Design (${dateScopedOrders.filter(o => ['In Design', 'Design'].includes(o.status)).length})` },
-          { id: 'READY_TO_GO', label: `🚀 Ready to Go (${dateScopedOrders.filter(o => o.status === 'Printing' || (o.media || []).some(m => m.category === 'Ready to Go')).length})` },
-          { id: 'Printing', label: `🖨️ 2. Printing (${dateScopedOrders.filter(o => o.status === 'Printing').length})` },
-          { id: 'Finishing', label: `⏳ 3. Progress (${dateScopedOrders.filter(o => o.status === 'Finishing').length})` },
-          { id: 'Ready', label: `✅ 4. Done / Ready (${dateScopedOrders.filter(o => ['Ready', 'Done', 'Pickup', 'Delivery'].includes(o.status)).length})` },
+          { id: 'New', label: `New (${dateScopedOrders.filter(o => o.status === 'New').length})` },
+          { id: 'In Design', label: `1. In Design (${dateScopedOrders.filter(o => ['In Design', 'Design'].includes(o.status)).length})` },
+          { id: 'READY_TO_GO', label: `Ready to Go (${dateScopedOrders.filter(o => o.status === 'Printing' || (o.media || []).some(m => m.category === 'Ready to Go')).length})` },
+          { id: 'Printing', label: `2. Printing (${dateScopedOrders.filter(o => o.status === 'Printing').length})` },
+          { id: 'Finishing', label: `3. Progress (${dateScopedOrders.filter(o => o.status === 'Finishing').length})` },
+          { id: 'Ready', label: `4. Done / Ready (${dateScopedOrders.filter(o => ['Ready', 'Done', 'Pickup', 'Delivery'].includes(o.status)).length})` },
           { id: 'Mistake', label: `! Mistake (${dateScopedOrders.filter(o => o.status === 'Mistake').length})` },
           { id: 'Cancelled', label: `✕ Cancelled (${dateScopedOrders.filter(o => o.status === 'Cancelled').length})` },
         ].map(filter => {
@@ -14399,7 +14491,7 @@
         showFeedback('✓ Signed records backup downloaded. Keep the JSON file in a safe location and do not edit it.');
       };
       const restoreLocalDataBackup = () => {
-        if (!isOwnerRole) { alert('Only the business Owner can restore a backup.'); return; }
+        if (!isOwnerOrReception) { alert('Only the Owner or Reception can restore a backup.'); return; }
         const picker = document.createElement('input');
         picker.type = 'file'; picker.accept = '.json,application/json';
         picker.onchange = async () => {
@@ -14418,7 +14510,7 @@
             });
             const verifyData = await verifyRes.json().catch(() => ({}));
             if (!verifyRes.ok || !verifyData.valid) {
-              alert(`🚫 Restore blocked\n\n${verifyData.error || 'The backup could not be verified.'}`);
+              alert(`Restore blocked\n\n${verifyData.error || 'The backup could not be verified.'}`);
               return;
             }
             const available = backupStorageKeys.filter(key => Object.prototype.hasOwnProperty.call(payload.data, key));
@@ -17190,9 +17282,9 @@
                                 h("div", {}, [
                                   h("label", { className: "block text-[10px] font-black uppercase text-slate-500 mb-1" }, "Transaction Type *"),
                                   h("select", { name: "recType", defaultValue: "Salary Payment", className: "w-full p-2.5 rounded-xl border border-slate-200 bg-white text-xs font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer" }, [
-                                    h("option", { value: "Salary Payment" }, "💵 Salary Payment"),
-                                    h("option", { value: "Borrowed" }, "🤝 Advance / Borrow"),
-                                    h("option", { value: "Repayment" }, "📥 Advance Repayment")
+                                    h("option", { value: "Salary Payment" }, "Salary Payment"),
+                                    h("option", { value: "Borrowed" }, "Advance / Borrow"),
+                                    h("option", { value: "Repayment" }, "Advance Repayment")
                                   ])
                                 ]),
                                 h("div", {}, [
@@ -17477,7 +17569,7 @@
                     h("p", { className: "text-xs text-slate-500 mt-0.5" }, "Manage staff roles, salary disbursements, advances and permissions."),
                     h("div", { className: "mt-2.5 flex items-center gap-2 flex-wrap" }, [
                       h("div", { className: "inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-950 text-xs font-bold" }, [
-                        h("span", { className: "text-slate-600 font-semibold text-[11px]" }, "🏪 Store Shop Code for Staff Login:"),
+                        h("span", { className: "text-slate-600 font-semibold text-[11px]" }, "Store Shop Code for Staff Login:"),
                         h("span", { className: "font-mono font-black text-indigo-700 bg-white px-2 py-0.5 rounded-lg border border-indigo-200 text-xs tracking-wider" }, authenticatedClient?.shop_code || storageService.getClientProfile()?.shop_code || 'PGBAG01'),
                         h("button", {
                           type: "button",
@@ -18265,8 +18357,8 @@
                           h("label", { className: "block font-bold uppercase text-slate-600 mb-1" }, "Assigned Role (RBAC) *"),
                           h("select", { name: "addMemberRole", defaultValue: 'reception', className: "w-full p-2.5 border border-indigo-200 bg-indigo-50/50 rounded-xl text-xs font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" }, [
                             h("option", { value: "reception" }, "Reception (Full Operational Access)"),
-                            h("option", { value: "designer" }, "Designer (Design Only — Finance Restricted)"),
-                            h("option", { value: "printer_finishing" }, "Printer & Finishing (Production Only — Finance Restricted)"),
+                            h("option", { value: "designer" }, "Designer (Design Only, Finance Restricted)"),
+                            h("option", { value: "printer_finishing" }, "Printer & Finishing (Production Only, Finance Restricted)"),
                             h("option", { value: "designer,printer_finishing" }, "Designer & Printer / Finisher (Dual Access)"),
                             h("option", { value: "owner" }, "Owner (Full Business Administrator)")
                           ])
@@ -18681,7 +18773,7 @@
                           className: "inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-indigo-200 bg-white hover:bg-indigo-50 text-indigo-700 text-xs font-black cursor-pointer shadow-2xs transition-all"
                         }, [
                           h(Icon, { name: "sparkles", className: "w-3.5 h-3.5 text-indigo-600" }),
-                          "✨ Auto-Match Colors to Logo"
+                          "Auto-Match Colors to Logo"
                         ]),
                         h("span", { className: "text-[11px] font-semibold text-slate-400" }, "or paste directly with Ctrl+V")
                       ]),
@@ -19121,7 +19213,7 @@
                   h("option", { value: "BS" }, "Bikram Sambat (BS - नेपाली मिति)"),
                   h("option", { value: "AD" }, "Gregorian Calendar (AD)")
                 ]),
-                h("p", { className: "text-[11px] font-semibold text-indigo-700 leading-relaxed pt-1" }, "⚡ Important: Changing this setting automatically switches date displays across all orders, customer balance sheets, PDF chalans and WhatsApp notifications.")
+                h("p", { className: "text-[11px] font-semibold text-indigo-700 leading-relaxed pt-1" }, "Important: Changing this setting automatically switches date displays across all orders, customer balance sheets, PDF chalans and WhatsApp notifications.")
               ]),
 
               h("div", { className: "grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs" }, [
@@ -19235,9 +19327,9 @@
                 ]),
                 h("div", { className: "flex flex-wrap gap-2.5" }, [
                   h("button", { type: "button", onClick: downloadLocalDataBackup, className: "inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-black text-white hover:bg-indigo-700 cursor-pointer shadow-sm" }, [h(Icon, { name: "download", className: "w-4 h-4" }), "Download Records Backup"]),
-                  isOwnerRole ? h("button", { type: "button", onClick: restoreLocalDataBackup, className: "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-black text-slate-700 hover:bg-slate-50 cursor-pointer" }, [h(Icon, { name: "history", className: "w-4 h-4" }), "Restore Backup"]) : null
+                  isOwnerOrReception ? h("button", { type: "button", onClick: restoreLocalDataBackup, className: "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-black text-slate-700 hover:bg-slate-50 cursor-pointer" }, [h(Icon, { name: "history", className: "w-4 h-4" }), "Restore Backup"]) : null
                 ]),
-                h("p", { className: "text-[11px] font-semibold text-slate-500 flex items-start gap-1.5" }, "🔒 Backups are digitally signed by the server. If a backup file is edited after download, Restore will be blocked and the attempt is logged. Only the Owner can restore.")
+                h("p", { className: "text-[11px] font-semibold text-slate-500 flex items-start gap-1.5" }, "Backups are digitally signed by the server. If a backup file is edited after download, Restore will be blocked and the attempt is logged. Only the Owner or Reception can restore.")
               ]),
 
               // ANNUAL CLOUD BACKUP & LIFECYCLE (1-YEAR ROLLOVER & PURGE)
@@ -19275,7 +19367,7 @@
                           h("div", { className: "flex items-center gap-2" }, [
                             h("span", { className: "font-mono font-black text-base text-slate-950" }, `Year ${yr.year}`),
                             h("span", { className: `text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full border ${isPurged ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : isArchived ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : isReady ? 'bg-amber-50 text-amber-800 border-amber-300 animate-pulse' : 'bg-slate-100 text-slate-600 border-slate-200'}` },
-                              isPurged ? '✓ Cloud Purged (Local Archived)' : isArchived ? '📥 Local Archived (Ready to Purge)' : isReady ? '🔔 1-Year Ready for Local Download' : 'Active in Cloud'
+                              isPurged ? '✓ Cloud Purged (Local Archived)' : isArchived ? 'Local Archived (Ready to Purge)' : isReady ? '1-Year Ready for Local Download' : 'Active in Cloud'
                             )
                           ]),
                           h("div", { className: "mt-1 text-xs text-slate-600 font-semibold" }, `${yr.monthCount} monthly backup${yr.monthCount === 1 ? '' : 's'} recorded • ${yr.orderCount} completed jobs • Revenue: ${storageService.formatCurrency(yr.totalRevenue)}`)
@@ -19289,7 +19381,7 @@
                               refresh();
                             },
                             className: "inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black shadow-2xs cursor-pointer"
-                          }, [h(Icon, { name: "download", className: "w-3.5 h-3.5" }), "📥 Download 1-Year Backup"]),
+                          }, [h(Icon, { name: "download", className: "w-3.5 h-3.5" }), "Download 1-Year Backup"]),
                           !isPurged ? h("button", {
                             type: "button",
                             onClick: async () => {
@@ -19300,7 +19392,7 @@
                               }
                             },
                             className: "inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-black shadow-2xs cursor-pointer"
-                          }, [h(Icon, { name: "trash", className: "w-3.5 h-3.5 text-rose-600" }), "🧹 Purge Cloudinary"]) : h("span", { className: "text-[11px] font-bold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200" }, "✓ Cloud Storage Cleaned")
+                          }, [h(Icon, { name: "trash", className: "w-3.5 h-3.5 text-rose-600" }), "Purge Cloudinary"]) : h("span", { className: "text-[11px] font-bold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200" }, "✓ Cloud Storage Cleaned")
                         ])
                       ])
                     ]);
@@ -19330,6 +19422,24 @@
     }
 
     return h("div", { className: "min-h-screen bg-slate-100/70 text-slate-900 font-sans flex" }, [
+      systemOfflinePopup && h("div", { key: "system-offline", className: "fixed inset-0 z-[245] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-md", role: "presentation" }, [
+        h("section", { role: "dialog", "aria-modal": "true", "aria-labelledby": "system-offline-title", "aria-describedby": "system-offline-message", className: "w-full max-w-md overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl" }, [
+          h("div", { className: "flex items-start gap-3 border-b border-slate-100 px-5 py-4" }, [
+            h("div", { className: "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-100 text-rose-700" }, h(Icon, { name: "alert", className: "h-5 w-5" })),
+            h("div", { className: "min-w-0 flex-1" }, [
+              h("h2", { id: "system-offline-title", className: "text-base font-black text-slate-950" }, "System Offline"),
+              h("p", { className: "mt-0.5 text-[11px] font-semibold text-slate-500" }, "The Print Ghar server cannot be reached.")
+            ])
+          ]),
+          h("div", { className: "px-5 py-5" }, [
+            h("p", { id: "system-offline-message", className: "text-sm font-semibold leading-6 text-slate-700" }, SYSTEM_OFFLINE_MESSAGE)
+          ]),
+          h("div", { className: "flex items-center gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3 text-xs font-semibold text-slate-500", role: "status", "aria-live": "polite" }, [
+            h("span", { className: "inline-block h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600", "aria-hidden": "true" }),
+            "Reconnecting automatically. This message will close once the connection is restored."
+          ])
+        ])
+      ]),
       appAlert && h("div", { key: `app-alert-${appAlert.id}`, className: "fixed inset-0 z-[250] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm animate-fade-in", role: "presentation" }, [
         h("section", { role: "alertdialog", "aria-modal": "true", "aria-labelledby": "app-alert-title", "aria-describedby": "app-alert-message", className: "w-full max-w-md overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl" }, [
           h("div", { className: "flex items-start gap-3 border-b border-slate-100 px-5 py-4" }, [
@@ -19544,7 +19654,7 @@
                     isClosingNotificationActive && h("div", { className: `rounded-2xl border p-4 space-y-3 ${isClosingNotificationActive ? 'border-indigo-200 bg-gradient-to-b from-indigo-50/70 to-white' : 'border-slate-200 bg-slate-50/70'}` }, [
                       h("div", { className: "flex items-center justify-between gap-2" }, [
                         h("div", {}, [
-                          h("div", { className: `inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider mb-1 ${isClosingNotificationActive ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-700'}` }, isClosingNotificationActive ? "🔔 6:00 PM EOD Report Active" : "☀️ Next at 6:00 PM"),
+                          h("div", { className: `inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider mb-1 ${isClosingNotificationActive ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-700'}` }, isClosingNotificationActive ? "6:00 PM EOD Report Active" : "Next at 6:00 PM"),
                           h("div", { className: "font-black text-sm text-slate-900" }, activeReportTitle),
                         ]),
                         h("span", { className: "text-[10px] font-mono font-bold text-indigo-700 bg-white px-2 py-1 rounded-lg border border-indigo-100" }, activeReportDate)
@@ -19610,18 +19720,18 @@
                           type: "button",
                           onClick: () => { storageService.exportDailyReportPDF(activeReportDate); setIsReminderPanelOpen(false); },
                           className: "inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black shadow-2xs cursor-pointer"
-                        }, [h(Icon, { name: "orders", className: "w-3.5 h-3.5" }), "📄 View PDF"]),
+                        }, [h(Icon, { name: "orders", className: "w-3.5 h-3.5" }), "View PDF"]),
                         h("button", {
                           type: "button",
                           onClick: () => { storageService.exportDailyReportExcel(activeReportDate); setIsReminderPanelOpen(false); },
                           className: "inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-2xs cursor-pointer"
-                        }, [h(Icon, { name: "download", className: "w-3.5 h-3.5" }), "📊 Excel"]),
+                        }, [h(Icon, { name: "download", className: "w-3.5 h-3.5" }), "Excel"]),
                       ]),
                       h("button", {
                         type: "button",
                         onClick: () => { setActiveTab('profile'); setIsReminderPanelOpen(false); },
                         className: "w-full py-2 text-center text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50/70 hover:bg-indigo-100 rounded-xl transition-all cursor-pointer block"
-                      }, "📂 Open Full Archive in Profile →")
+                      }, "Open Full Archive in Profile →")
                     ]),
 
                     // Persistent low-stock alerts stay visible until each configured threshold is cleared.
@@ -19680,7 +19790,7 @@
                                 refresh();
                               },
                               className: "inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-black shadow-2xs cursor-pointer"
-                            }, [h(Icon, { name: "download", className: "w-3.5 h-3.5" }), "📥 Download Backup"]),
+                            }, [h(Icon, { name: "download", className: "w-3.5 h-3.5" }), "Download Backup"]),
                             h("button", {
                               type: "button",
                               onClick: async () => {
@@ -19691,7 +19801,7 @@
                                 }
                               },
                               className: "inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border border-rose-200 bg-white hover:bg-rose-50 text-rose-700 text-[11px] font-black shadow-2xs cursor-pointer"
-                            }, [h(Icon, { name: "trash", className: "w-3.5 h-3.5 text-rose-600" }), "🧹 Purge Cloud"])
+                            }, [h(Icon, { name: "trash", className: "w-3.5 h-3.5 text-rose-600" }), "Purge Cloud"])
                           ])
                         ]))
                       ]);
@@ -19738,9 +19848,9 @@
             className: "mb-4 p-4 rounded-2xl bg-rose-50 border border-rose-300 text-rose-950 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
           }, [
             h("div", { className: "flex items-center gap-3" }, [
-              h("div", { className: "w-9 h-9 rounded-xl bg-rose-600 text-white flex items-center justify-center font-bold text-base shrink-0 shadow-xs" }, "🔒"),
+              h("div", { className: "w-9 h-9 rounded-xl bg-rose-600 text-white flex items-center justify-center font-bold text-base shrink-0 shadow-xs" }, h(Icon, { name: "lock", className: "w-4 h-4" })),
               h("div", null, [
-                h("div", { className: "text-sm font-black text-rose-950" }, "Subscription Expired — Read-Only Mode Active"),
+                h("div", { className: "text-sm font-black text-rose-950" }, "Subscription Expired: Read-Only Mode Active"),
                 h("div", { className: "text-xs font-semibold text-rose-800 mt-0.5" }, "Your plan subscription has expired. Creating new orders is blocked until renewed. Please contact your platform administrator or developer console.")
               ])
             ]),
@@ -19752,7 +19862,7 @@
             className: "mb-4 p-3.5 rounded-2xl bg-amber-50 border border-amber-300 text-amber-950 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
           }, [
             h("div", { className: "flex items-center gap-3" }, [
-              h("div", { className: "w-8 h-8 rounded-xl bg-amber-500 text-white flex items-center justify-center font-bold text-sm shrink-0 shadow-xs" }, "⏳"),
+              h("div", { className: "w-8 h-8 rounded-xl bg-amber-500 text-white flex items-center justify-center font-bold text-sm shrink-0 shadow-xs" }, h(Icon, { name: "clock", className: "w-4 h-4" })),
               h("div", null, [
                 h("div", { className: "text-xs font-black text-amber-950" }, "Subscription Renewal Notice"),
                 h("div", { className: "text-xs font-semibold text-amber-800 mt-0.5" }, `Your subscription expires in ${authenticatedClient.subscription.daysRemaining} day(s). Please renew promptly to prevent account disruption.`)
@@ -19983,7 +20093,7 @@
                 },
                 className: "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-800 text-xs font-bold hover:bg-emerald-100 transition-colors cursor-pointer shadow-2xs"
               }, [
-                h("span", {}, "💰"),
+                h(Icon, { name: "wallet", className: "w-4 h-4" }),
                 h("span", {}, "Payment")
               ]),
 
@@ -20076,6 +20186,14 @@
                       h(Icon, { name: "clock", className: "w-3.5 h-3.5 text-slate-400" }),
                       h("span", {}, "View Activity / History")
                     ]),
+                    !isProductionOrDesignRole && h("button", {
+                      type: "button",
+                      onClick: () => openRepeatOrder(selectedOrder),
+                      className: "w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 cursor-pointer transition-colors"
+                    }, [
+                      h(Icon, { name: "repeat", className: "w-3.5 h-3.5 text-indigo-500" }),
+                      h("span", {}, "Repeat Order")
+                    ]),
                     !isProductionOrDesignRole && selectedOrder.status !== 'Cancelled' && h("button", {
                       type: "button",
                       onClick: () => {
@@ -20092,7 +20210,7 @@
                   h("div", { className: "space-y-0.5 pt-1" }, [
                     selectedOrder.status === 'Cancelled' && (selectedOrder.stockAllocations || []).some(allocation => allocation.consumedAt && !allocation.restoredAt) && h("button", {
                       type: "button",
-                      onClick: () => { setOrderMoreDropdownOpen(false); const authorizedMembers = team.filter(member => /admin|owner|inventory|stock|manager/i.test(String(member.jobTitle || ''))); if (!authorizedMembers.length) { alert('Stock restore requires an Owner, Admin, Inventory, Stock, or Manager team role. Add an authorized member in Profile → Team.'); return; } const pin = prompt('Authorized inventory PIN required:', ''); if (pin === null) return; const member = authorizedMembers.find(entry => String(entry.pin || '') === String(pin).replace(/\D/g, '')); if (!member) { alert('Incorrect PIN or this team member is not authorized to restore stock.'); return; } if (!confirm(`Restore previously consumed inventory for ${selectedOrder.orderNumber}? Use this only if materials were physically returned to stock.`)) return; const result = storageService.restoreOrderStock(selectedOrder.id, member.name); if (result) { setSelectedOrder(result.order); refresh(); alert(`Restored ${result.restored} total material units.`); } },
+                      onClick: async () => { setOrderMoreDropdownOpen(false); const authorizedMembers = team.filter(member => /admin|owner|inventory|stock|manager/i.test(String(member.jobTitle || ''))); if (!authorizedMembers.length) { alert('Stock restore requires an Owner, Admin, Inventory, Stock, or Manager team role. Add an authorized member in Profile → Team.'); return; } const pin = prompt('Authorized inventory PIN required:', ''); if (pin === null) return; if (!confirm(`Restore previously consumed inventory for ${selectedOrder.orderNumber}? Use this only if materials were physically returned to stock.`)) return; try { const result = await storageService.restoreOrderStock(selectedOrder.id, String(pin).replace(/\D/g, '')); if (result) { setSelectedOrder(result.order); refresh(); alert(`Restored ${result.restored} total material units.`); } } catch (err) { alert(err.message || 'Stock could not be restored.'); } },
                       className: "w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold text-emerald-700 hover:bg-emerald-50 cursor-pointer transition-colors"
                     }, [h(Icon, { name: "stock", className: "w-3.5 h-3.5 text-emerald-600" }), h("span", {}, "Restore Consumed Stock")]),
                     isOrderCancellable(selectedOrder) && h("button", {
@@ -20147,6 +20265,25 @@
                   h("div", { className: "flex items-center gap-2" }, [
                     h("span", { className: "text-slate-400 font-bold" }, "Date:"),
                     h("span", { className: "font-semibold" }, `${storageService.formatDateForMode(selectedOrder.orderDate, settings.dateMode)}${selectedOrder.dueTime ? ` • ${selectedOrder.dueTime}` : ''}`)
+                  ]),
+                  selectedOrder.repeatOfOrderNumber && h("div", { className: "flex flex-wrap items-center gap-x-2 gap-y-1" }, [
+                    h("span", { className: "text-slate-400 font-bold" }, "Repeat of:"),
+                    (() => {
+                      const source = storageService.getOrderById(selectedOrder.repeatOfOrderId);
+                      return source
+                        ? h("button", { type: "button", onClick: () => setSelectedOrder(source), className: "font-mono font-bold text-indigo-600 hover:underline cursor-pointer" }, selectedOrder.repeatOfOrderNumber)
+                        : h("span", { className: "font-mono font-bold text-slate-700" }, selectedOrder.repeatOfOrderNumber);
+                    })(),
+                    h("span", { className: "rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-black text-amber-800" }, selectedOrder.repeatDesignMode === 'same' ? 'Same design' : 'Design changes')
+                  ]),
+                  selectedOrderRepeats.length > 0 && h("div", { className: "flex flex-wrap items-center gap-x-2 gap-y-1" }, [
+                    h("span", { className: "text-slate-400 font-bold" }, `Repeated ${selectedOrderRepeats.length}×:`),
+                    ...selectedOrderRepeats.map(repeat => {
+                      const target = storageService.getOrderById(repeat.id) || storageService.getOrderById(repeat._id);
+                      return target
+                        ? h("button", { key: repeat.id, type: "button", onClick: () => setSelectedOrder(target), className: "font-mono font-bold text-indigo-600 hover:underline cursor-pointer" }, repeat.orderNumber)
+                        : h("span", { key: repeat.id, className: "font-mono font-bold text-slate-700" }, repeat.orderNumber);
+                    })
                   ]),
                   orderCountdown(selectedOrder) && orderCountdown(selectedOrder).includes('overdue') && h("div", { className: "pt-1" }, [
                     h("span", { className: "inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-black border bg-rose-50 text-rose-700 border-rose-200" }, orderCountdown(selectedOrder))
@@ -20219,7 +20356,7 @@
                       const targetRank = STATUS_RANKS[st.status] ?? 0;
                       const isCurrent = selectedStatus === st.status;
                       const isPast = targetRank < currentRank;
-                      const isDisabled = isDoneLocked || targetRank > currentRank + 1;
+                      const isDisabled = isDoneLocked || selectedOrder.status === 'Mistake' || targetRank > currentRank + 1;
                       return h("button", { key: st.status, type: "button", disabled: isDisabled && !isCurrent, onClick: () => moveTo(st.status, st.status), className: `flex min-h-10 items-center gap-2 rounded-xl border px-2.5 py-2 text-left text-[10px] font-black transition ${isDisabled && !isCurrent ? 'cursor-not-allowed border-slate-100 bg-slate-50 text-slate-300' : isCurrent ? 'border-indigo-200 bg-indigo-50 text-indigo-800' : isPast ? 'border-emerald-100 bg-emerald-50/50 text-emerald-700' : 'border-slate-200 bg-white text-slate-700 hover:border-indigo-200 hover:bg-indigo-50'}` }, [
                         h("span", { className: `flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[9px] ${isCurrent ? 'bg-indigo-600 text-white' : isPast ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}` }, isCurrent || isPast ? '✓' : st.step),
                         h("span", {}, st.label)
@@ -20236,7 +20373,7 @@
                         },
                         className: `w-full rounded-xl border px-2.5 py-2 text-[10px] font-black transition flex items-center justify-center gap-1.5 ${!isDoneLocked ? 'cursor-not-allowed border-slate-100 bg-slate-50 text-slate-300' : selectedStatus === 'Payment' ? 'border-emerald-300 bg-emerald-100 text-emerald-900' : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'}`
                       }, [
-                        h("span", {}, "💰"),
+                        h(Icon, { name: "wallet", className: "w-4 h-4" }),
                         h("span", {}, "Collect / Update Payment")
                       ])
                     ]),
@@ -21033,7 +21170,7 @@
               h(SegmentedChoice, { name: 'pProductionType', defaultValue: editingProduct?.productionType || 'In Store', options: [{ value: 'In Store', label: 'In Store' }, { value: 'Outsource', label: 'Outsource' }] })
             ]),
             h("label", { className: `flex cursor-pointer items-center justify-between gap-3 rounded-xl border px-3 py-3 ${productMaterialsEnabled ? 'border-emerald-200 bg-emerald-50/50' : 'border-slate-200 bg-slate-50'}` }, [
-              h("span", {}, [h("span", { className: "block text-xs font-black text-slate-800" }, "Product Materials / Stock Usage"), h("span", { className: "mt-0.5 block text-[10px] font-semibold text-slate-500" }, productMaterialsEnabled ? "Enabled — at least one stock link is required." : "Disabled — this product can be ordered without stock links.")]),
+              h("span", {}, [h("span", { className: "block text-xs font-black text-slate-800" }, "Product Materials / Stock Usage"), h("span", { className: "mt-0.5 block text-[10px] font-semibold text-slate-500" }, productMaterialsEnabled ? "Enabled: at least one stock link is required." : "Disabled: this product can be ordered without stock links.")]),
               h("span", { className: `relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors ${productMaterialsEnabled ? 'bg-emerald-600' : 'bg-slate-300'}` }, [h("input", { type: "checkbox", checked: productMaterialsEnabled, onChange: event => { const enabled = event.target.checked; setProductMaterialsEnabled(enabled); if (!enabled) setProductSubOptionsEnabled(false); }, className: "sr-only" }), h("span", { className: `absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${productMaterialsEnabled ? 'translate-x-5' : 'translate-x-0.5'}` })])
             ]),
             productMaterialsEnabled && h("div", { className: "space-y-2" }, [
@@ -21197,16 +21334,16 @@
       ]),
 
       // DESIGNER SELECTION & PRINTING GATE MODAL
-      designerPendingOrder && h("div", { key: "designermodal", className: "fixed inset-0 z-[85] flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm", onMouseDown: (e) => { if (e.target === e.currentTarget) { setDesignerPendingOrder(null); setPrintingGateJobNumber(''); setPrintingGateFiles([]); setPrintingGateGroupBreakdowns({}); setPrintingGateError(''); setSelectedDesignerId(''); } } }, [
+      designerPendingOrder && h("div", { key: "designermodal", className: "fixed inset-0 z-[85] flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm", onMouseDown: (e) => { if (e.target === e.currentTarget) { setDesignerPendingOrder(null); setPrintingGateGroupBreakdowns({}); setPrintingGateError(''); setSelectedDesignerId(''); } } }, [
         h("div", { className: "w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden" }, [
           h("div", { className: "px-5 py-4 bg-indigo-700 text-white flex items-center justify-between gap-3" }, [
             h("div", {}, [
               h("h3", { className: "font-black text-lg" }, "Confirm Upgrade to Printing"),
-              h("p", { className: "text-xs text-indigo-100 mt-0.5" }, `${designerPendingOrder.orderNumber} • Enter Job No. OR upload design file`)
+              h("p", { className: "text-xs text-indigo-100 mt-0.5" }, `${designerPendingOrder.orderNumber} • Select the designer`)
             ]),
             h("button", {
               type: "button",
-              onClick: () => { setDesignerPendingOrder(null); setPrintingGateJobNumber(''); setPrintingGateFiles([]); setPrintingGateGroupBreakdowns({}); setPrintingGateError(''); setSelectedDesignerId(''); },
+              onClick: () => { setDesignerPendingOrder(null); setPrintingGateGroupBreakdowns({}); setPrintingGateError(''); setSelectedDesignerId(''); },
               className: "rounded-lg p-1 text-indigo-200 hover:bg-white/10 hover:text-white cursor-pointer",
               "aria-label": "Close"
             }, h(Icon, { name: "x", className: "w-4 h-4" }))
@@ -21279,53 +21416,6 @@
                 }))
               ]);
             })(),
-            h("div", { className: "rounded-2xl border border-indigo-200 bg-indigo-50/60 p-4 space-y-3" }, [
-              h("div", {}, [
-                h("div", { className: "flex items-center justify-between gap-2 mb-1" }, [
-                  h("label", { htmlFor: "printing-job-confirmation", className: "block text-[10px] font-black uppercase tracking-wider text-indigo-700" }, "Option 1: Enter Job Number *"),
-                  printingGateJobNumber.trim().toUpperCase() === String(designerPendingOrder.orderNumber || '').trim().toUpperCase() && h("span", { className: "rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-black text-emerald-700" }, "✓ Matched")
-                ]),
-                h("input", {
-                  id: "printing-job-confirmation",
-                  value: printingGateJobNumber,
-                  onChange: event => { setPrintingGateJobNumber(event.target.value); setPrintingGateError(''); },
-                  placeholder: `e.g. ${designerPendingOrder.orderNumber}`,
-                  autoComplete: "off",
-                  className: "w-full rounded-xl border border-indigo-200 bg-white px-3 py-2.5 font-mono text-sm font-black uppercase outline-none focus:ring-2 focus:ring-indigo-500"
-                }),
-                h("p", { className: "mt-1 text-[10px] font-semibold text-indigo-500" }, `Type ${designerPendingOrder.orderNumber} exactly.`)
-              ]),
-              h("div", { className: "relative flex items-center justify-center py-0.5" }, [
-                h("div", { className: "absolute inset-0 flex items-center" }, h("div", { className: "w-full border-t border-indigo-200" })),
-                h("span", { className: "relative bg-indigo-50 px-2.5 text-[9px] font-black uppercase tracking-wider text-indigo-600 rounded-full" }, "OR")
-              ]),
-              h("div", {}, [
-                h("div", { className: "flex items-center justify-between gap-3" }, [
-                  h("div", { className: "text-[10px] font-black uppercase tracking-wider text-indigo-700" }, "Option 2: Attach Design File (Ready to Go)"),
-                  (() => {
-                    const readyCount = (designerPendingOrder.media || []).filter(m => m.category === 'Ready to Go').length;
-                    return readyCount > 0 ? h("span", { className: "rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-black text-emerald-700" }, `${readyCount} design file${readyCount === 1 ? '' : 's'} attached`) : null;
-                  })()
-                ]),
-                h("label", { htmlFor: "printing-design-file", className: "mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed border-indigo-300 bg-white px-3 py-3 text-xs font-black text-indigo-700 hover:bg-indigo-50" }, [
-                  h(Icon, { name: "paperclip", className: "w-4 h-4" }),
-                  (designerPendingOrder.media || []).filter(m => m.category === 'Ready to Go').length ? "Add another design file" : "Upload design file"
-                ]),
-                h("input", {
-                  id: "printing-design-file",
-                  type: "file",
-                  multiple: true,
-                  accept: ".jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.pdf,.tif,.tiff,.psd,.psb,.ai,.eps,.svg,.cdr,.dxf,.dwg,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.7z",
-                  onChange: handlePrintingGateFiles,
-                  className: "sr-only"
-                }),
-                printingGateFiles.length > 0 && h("div", { className: "mt-2 space-y-1.5" }, printingGateFiles.map(file => h("div", { key: file.id, className: "flex items-center gap-2 rounded-lg border border-indigo-100 bg-white px-2.5 py-2" }, [
-                  h(Icon, { name: "file", className: "w-3.5 h-3.5 text-indigo-600" }),
-                  h("span", { className: "min-w-0 flex-1 truncate text-[10px] font-bold text-slate-700" }, file.name),
-                  h("button", { type: "button", onClick: () => setPrintingGateFiles(files => files.filter(item => item.id !== file.id)), className: "text-rose-500 hover:text-rose-700 cursor-pointer", "aria-label": `Remove ${file.name}` }, h(Icon, { name: "x", className: "w-3.5 h-3.5" }))
-                ])))
-              ])
-            ]),
             printingGateError && h("div", { role: "alert", className: "rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs font-bold text-rose-700" }, printingGateError),
             isDesignerRole ? h("div", { className: "rounded-xl border border-emerald-200 bg-emerald-50/80 p-3 flex items-center justify-between" }, [
               h("div", { className: "flex items-center gap-2.5" }, [
@@ -21349,7 +21439,7 @@
             h("div", { className: "flex items-center gap-2 pt-2 border-t border-slate-100" }, [
               h("button", {
                 type: "button",
-                onClick: () => { setDesignerPendingOrder(null); setPrintingGateJobNumber(''); setPrintingGateFiles([]); setPrintingGateQuantities({}); setPrintingGateGroupBreakdowns({}); setPrintingGateError(''); setSelectedDesignerId(''); },
+                onClick: () => { setDesignerPendingOrder(null); setPrintingGateQuantities({}); setPrintingGateGroupBreakdowns({}); setPrintingGateError(''); setSelectedDesignerId(''); },
                 className: "flex-1 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
               }, "Cancel"),
               h("button", {
@@ -21688,7 +21778,7 @@
               const entered = String(teamPinModal.enteredPin || '').trim();
               const targetPin = String(teamPinModal.member.pin || '123456').trim();
               if (entered !== targetPin) {
-                setTeamPinModal(prev => ({ ...prev, error: `❌ Incorrect PIN for ${teamPinModal.member.name}. Please enter correct 6 digits.`, enteredPin: '' }));
+                setTeamPinModal(prev => ({ ...prev, error: `Incorrect PIN for ${teamPinModal.member.name}. Please enter correct 6 digits.`, enteredPin: '' }));
                 return;
               }
               const successCb = teamPinModal.onSuccess;
@@ -22545,20 +22635,17 @@
               h("button", { type: "button", onClick: () => setClientPaymentModal(current => ({ ...current, method: 'Pay' })), className: `rounded-xl border px-3 py-2.5 text-xs font-black cursor-pointer ${clientPaymentModal.method === 'Pay' ? 'border-emerald-500 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}` }, "Cash"),
               h("button", { type: "button", onClick: () => setClientPaymentModal(current => ({ ...current, method: 'Online' })), className: `rounded-xl border px-3 py-2.5 text-xs font-black cursor-pointer ${clientPaymentModal.method === 'Online' ? 'border-blue-500 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-600'}` }, "Online")
             ])]),
-            h("div", {}, [
-              h("div", { className: "mb-1.5 flex items-center justify-between gap-2" }, [h("span", { className: "text-[10px] font-black uppercase tracking-wider text-slate-500" }, "Payment Receipt"), h("span", { className: "text-[9px] font-bold text-slate-400" }, "Optional · Image/PDF · Max 8 MB")]),
-              clientPaymentModal.receiptFile ? h("div", { className: "flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3" }, [
-                h("span", { className: "flex h-9 w-9 items-center justify-center rounded-lg bg-white text-emerald-600 shadow-sm" }, h(Icon, { name: "file", className: "h-4 w-4" })),
-                h("div", { className: "min-w-0 flex-1" }, [h("div", { className: "truncate text-xs font-black text-emerald-900" }, clientPaymentModal.receiptFile.name), h("div", { className: "mt-0.5 text-[9px] font-bold text-emerald-700" }, formatFileSize(clientPaymentModal.receiptFile.size))]),
-                h("button", { type: "button", onClick: () => setClientPaymentModal(current => ({ ...current, receiptFile: null })), className: "rounded-lg p-2 text-emerald-700 hover:bg-emerald-100 cursor-pointer", "aria-label": "Remove payment photo" }, h(Icon, { name: "x", className: "h-4 w-4" }))
-              ]) : h("label", { className: "flex cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-4 text-xs font-black text-slate-600 hover:border-violet-400 hover:bg-violet-50 hover:text-violet-700" }, [
-                h(Icon, { name: "plus", className: "h-4 w-4" }), "Upload receipt",
-                h("input", { type: "file", accept: "image/jpeg,image/png,image/webp,application/pdf", className: "hidden", onChange: event => { const file = event.target.files?.[0]; event.target.value = ''; if (!file) return; if (!(file.type.startsWith('image/') || file.type === 'application/pdf')) { setClientPaymentModal(current => ({ ...current, error: 'Select a JPG, PNG, WebP or PDF payment receipt.' })); return; } if (file.size > 8 * 1024 * 1024) { setClientPaymentModal(current => ({ ...current, error: 'Payment receipt must be 8 MB or smaller.' })); return; } setClientPaymentModal(current => ({ ...current, receiptFile: { id: createId('receipt'), file, name: file.name, type: file.type, size: file.size }, error: '' })); } })
-              ])
-            ]),
             h("label", { className: "block" }, [h("span", { className: "mb-1.5 block text-[10px] font-black uppercase tracking-wider text-slate-500" }, "Reference / Note (Optional)"), h("input", { value: clientPaymentModal.note, onChange: event => setClientPaymentModal(current => ({ ...current, note: event.target.value })), placeholder: "Bank reference, receipt number...", className: "w-full rounded-xl border border-slate-200 px-3 py-2.5 text-xs font-semibold outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100" })]),
             h("div", { className: "rounded-xl border border-violet-100 bg-violet-50 px-3 py-2.5 text-[10px] font-bold leading-relaxed text-violet-800" }, "The payment will be applied automatically to the oldest credit jobs first. Any extra amount becomes client advance."),
             clientPaymentModal.error && h("div", { className: "rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700" }, clientPaymentModal.error),
+            h("div", { className: "grid grid-cols-2 gap-2 pt-1" }, [
+              h("button", { type: "button", onClick: () => setClientPaymentModal(null), className: "rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black text-slate-700 hover:bg-slate-50 cursor-pointer" }, "Cancel"),
+              h("button", {
+                type: "submit",
+                disabled: Boolean(clientPaymentModal.isSaving) || !clientPaymentModal.customer,
+                className: "rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white hover:bg-violet-800 cursor-pointer shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+              }, clientPaymentModal.isSaving ? "Recording Payment..." : "Record Payment")
+            ])
           ])
         ])
       ]),
@@ -23442,7 +23529,9 @@
                 invoicePrefix: '',
                 invoiceStartNumber: Math.max(1, parseInt(f.invoiceStartNumber.value, 10) || 1),
                 jobPrefix: f.jobPrefix.value.trim() || 'JOB-',
-                jobStartNumber: Math.max(1, parseInt(f.jobStartNumber.value, 10) || 1)
+                jobStartNumber: Math.max(1, parseInt(f.jobStartNumber.value, 10) || 1),
+                lockJobNumbering: true,
+                lockInvoiceNumbering: true
               });
               setSettings(storageService.getSettings());
               refresh();
@@ -23453,17 +23542,18 @@
             h("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-3" }, [
               h("div", { className: "sm:col-span-2" }, [
                 h("label", { className: "block font-bold uppercase text-slate-600 mb-1" }, "Invoice Starting Number (Where to start)"),
-                h("input", { name: "invoiceStartNumber", type: "number", min: 1, defaultValue: settings.invoiceStartNumber || 1042, className: "w-full p-2.5 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" }),
-                h("p", { className: "mt-1 text-[10px] text-slate-400 font-medium" }, "No invoice prefix needed. Invoices are numbered purely sequentially starting from this value.")
+                h("input", { name: "invoiceStartNumber", type: "number", min: 1, defaultValue: settings.invoiceStartNumber || 1042, readOnly: Boolean(settings.invoiceNumberingLocked), "aria-readonly": Boolean(settings.invoiceNumberingLocked), className: "w-full p-2.5 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" + (settings.invoiceNumberingLocked ? " bg-slate-100 text-slate-500 cursor-not-allowed" : "") }),
+                h("p", { className: "mt-1 text-[10px] text-slate-400 font-medium" }, settings.invoiceNumberingLocked ? "Locked after first setup. Ask the platform developer to unlock it." : "No invoice prefix needed. Invoices are numbered purely sequentially starting from this value. You can set this once.")
               ]),
               h("div", {}, [
                 h("label", { className: "block font-bold uppercase text-slate-600 mb-1" }, "Job Prefix"),
-                h("input", { name: "jobPrefix", required: true, defaultValue: settings.jobPrefix || 'JOB-', className: "w-full p-2.5 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" })
+                h("input", { name: "jobPrefix", required: true, defaultValue: settings.jobPrefix || 'JOB-', readOnly: Boolean(settings.jobNumberingLocked), "aria-readonly": Boolean(settings.jobNumberingLocked), className: "w-full p-2.5 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" + (settings.jobNumberingLocked ? " bg-slate-100 text-slate-500 cursor-not-allowed" : "") }),
+                h("p", { className: "mt-1 text-[10px] text-slate-400 font-medium" }, settings.jobNumberingLocked ? "Locked after first setup. Ask the platform developer to unlock it." : "You can set this once.")
               ]),
               h("div", {}, [
                 h("label", { className: "block font-bold uppercase text-slate-600 mb-1" }, "Job Starting Number (Where to start)"),
-                h("input", { name: "jobStartNumber", type: "number", min: 1, defaultValue: settings.jobStartNumber || 1042, className: "w-full p-2.5 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" }),
-                h("p", { className: "mt-1 text-[10px] text-slate-400 font-medium" }, "Starting number for job orders")
+                h("input", { name: "jobStartNumber", type: "number", min: 1, defaultValue: settings.jobStartNumber || 1042, readOnly: Boolean(settings.jobNumberingLocked), "aria-readonly": Boolean(settings.jobNumberingLocked), className: "w-full p-2.5 border border-slate-200 rounded-xl text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" + (settings.jobNumberingLocked ? " bg-slate-100 text-slate-500 cursor-not-allowed" : "") }),
+                h("p", { className: "mt-1 text-[10px] text-slate-400 font-medium" }, settings.jobNumberingLocked ? "Locked after first setup. Ask the platform developer to unlock it." : "Starting number for job orders. You can set this once.")
               ])
             ]),
             h("div", { className: "p-3.5 rounded-xl bg-slate-50 border border-slate-100 space-y-1.5" }, [
@@ -23953,12 +24043,122 @@
       }),
 
       // NEW ORDER MODAL
+      repeatSetup && (() => {
+        const { order, rows } = repeatSetup;
+        const oldDue = order.status === 'Cancelled' ? 0 : storageService.getOrderDueAmount(order);
+        const repeatsToday = selectedOrderRepeats.filter(repeat => repeat.orderDate === todayStr);
+        const oldFiles = (order.media || []).filter(file => file && file.name);
+        const rateChanged = rows.some(row => row.product && row.oldRate !== row.currentRate);
+        const warnings = [
+          order.status === 'Cancelled' && `${order.orderNumber} was cancelled. Confirm the client really wants this job.`,
+          order.status === 'Mistake' && `${order.orderNumber} was marked as a Mistake. Check the details before repeating.`,
+          oldDue > 0 && `${order.orderNumber} still has ${storageService.formatCurrency(oldDue)} unpaid.`,
+          repeatsToday.length > 0 && `Already repeated today as ${repeatsToday.map(repeat => repeat.orderNumber).join(', ')}.`,
+          rows.some(row => !row.product) && 'Some products no longer exist and cannot be repeated.'
+        ].filter(Boolean);
+        const optionClass = active => `flex-1 min-w-[10rem] text-left rounded-xl border p-3 cursor-pointer transition-colors ${active ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500' : 'border-slate-200 bg-white hover:bg-slate-50'}`;
+        return h("div", { key: "repeatsetupmodal", className: "fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in", onClick: e => { if (e.target === e.currentTarget) setRepeatSetup(null); } }, [
+          h("div", { role: "dialog", "aria-modal": "true", "aria-labelledby": "repeat-setup-title", className: "min-w-0 bg-slate-50 rounded-2xl sm:rounded-3xl max-w-2xl w-full shadow-2xl border border-slate-200 max-h-[94vh] flex flex-col overflow-hidden text-xs" }, [
+            h("div", { className: "flex items-start justify-between gap-3 px-4 sm:px-6 py-4 border-b border-slate-200 bg-white" }, [
+              h("div", { className: "flex items-center gap-3 min-w-0" }, [
+                h("div", { className: "w-10 h-10 shrink-0 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-md" }, h(Icon, { name: "repeat", className: "w-5 h-5" })),
+                h("div", { className: "min-w-0" }, [
+                  h("h3", { id: "repeat-setup-title", className: "font-black text-lg text-slate-950" }, `Repeat ${order.orderNumber}`),
+                  h("p", { className: "text-slate-500 mt-0.5" }, `A new job is created for ${order.customerName || 'this client'}. ${order.orderNumber} stays closed with its bill and payments.`)
+                ])
+              ]),
+              h("button", { type: "button", title: "Close", onClick: () => setRepeatSetup(null), className: "flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-400 hover:bg-rose-50 hover:text-rose-600 cursor-pointer" }, h(Icon, { name: "x", className: "w-4 h-4" }))
+            ]),
+
+            h("div", { className: "flex-1 overflow-y-auto p-4 sm:p-6 space-y-4" }, [
+              warnings.length > 0 && h("div", { className: "rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-1" }, warnings.map((text, i) =>
+                h("div", { key: i, className: "flex items-start gap-2 font-bold text-amber-900" }, [h(Icon, { name: "alert", className: "w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-600" }), h("span", {}, text)])
+              )),
+
+              h("div", { className: "space-y-2" }, [
+                h("div", { className: "font-black uppercase text-[10px] tracking-wide text-slate-600" }, "Design"),
+                h("div", { className: "flex flex-wrap gap-2" }, [
+                  h("button", { type: "button", "aria-pressed": repeatSetup.designMode === 'same', onClick: () => setRepeatSetup({ ...repeatSetup, designMode: 'same' }), className: optionClass(repeatSetup.designMode === 'same') }, [
+                    h("div", { className: "font-black text-slate-900" }, "Same design"),
+                    h("div", { className: "mt-0.5 text-[10px] font-semibold text-slate-500" }, "Print exactly as last time.")
+                  ]),
+                  h("button", { type: "button", "aria-pressed": repeatSetup.designMode === 'changes', onClick: () => setRepeatSetup({ ...repeatSetup, designMode: 'changes' }), className: optionClass(repeatSetup.designMode === 'changes') }, [
+                    h("div", { className: "font-black text-slate-900" }, "Design changes"),
+                    h("div", { className: "mt-0.5 text-[10px] font-semibold text-slate-500" }, "Designer updates the old file first.")
+                  ])
+                ])
+              ]),
+
+              rateChanged && h("div", { className: "space-y-2" }, [
+                h("div", { className: "font-black uppercase text-[10px] tracking-wide text-slate-600" }, "Rate"),
+                h("div", { className: "flex flex-wrap gap-2" }, [
+                  h("button", { type: "button", "aria-pressed": repeatSetup.rateMode === 'current', onClick: () => setRepeatSetup({ ...repeatSetup, rateMode: 'current' }), className: optionClass(repeatSetup.rateMode === 'current') }, [
+                    h("div", { className: "font-black text-slate-900" }, "Current rate"),
+                    h("div", { className: "mt-0.5 text-[10px] font-semibold text-slate-500" }, "Today's price for this client.")
+                  ]),
+                  h("button", { type: "button", "aria-pressed": repeatSetup.rateMode === 'old', onClick: () => setRepeatSetup({ ...repeatSetup, rateMode: 'old' }), className: optionClass(repeatSetup.rateMode === 'old') }, [
+                    h("div", { className: "font-black text-slate-900" }, "Old rate"),
+                    h("div", { className: "mt-0.5 text-[10px] font-semibold text-slate-500" }, `Same price as ${order.orderNumber}.`)
+                  ])
+                ])
+              ]),
+
+              h("div", { className: "space-y-2" }, [
+                h("div", { className: "font-black uppercase text-[10px] tracking-wide text-slate-600" }, "Products"),
+                rows.length === 0 && h("div", { className: "rounded-xl border border-dashed border-slate-300 bg-white p-4 text-center font-semibold text-slate-500" }, "This job has no products to repeat."),
+                ...rows.map(row => h("div", { key: row.key, className: `rounded-xl border bg-white p-3 ${row.product ? 'border-slate-200' : 'border-slate-200 opacity-60'}` }, [
+                  h("div", { className: "flex items-start gap-3" }, [
+                    h("input", { type: "checkbox", checked: row.include, disabled: !row.product, "aria-label": `Repeat ${row.item.productName}`, onChange: e => updateRepeatRow(row.key, { include: e.currentTarget.checked }), className: "mt-0.5 h-4 w-4 shrink-0 accent-indigo-600 cursor-pointer" }),
+                    h("div", { className: "min-w-0 flex-1" }, [
+                      h("div", { className: "font-black text-slate-900 break-words" }, row.item.productName),
+                      row.item.itemDescription && h("div", { className: "mt-0.5 text-[10px] font-semibold text-slate-500 line-clamp-2" }, row.item.itemDescription),
+                      row.unavailableReason && h("div", { className: "mt-0.5 text-[10px] font-bold text-rose-600" }, row.unavailableReason)
+                    ])
+                  ]),
+                  row.product && h("div", { className: "mt-2 pl-7 flex flex-wrap items-end gap-x-4 gap-y-2" }, [
+                    h("label", { className: "block" }, [
+                      h("span", { className: "block text-[10px] font-bold text-slate-500 mb-0.5" }, `Quantity${Number(row.item.quantity) > 0 ? ` (last: ${row.item.quantity})` : ''}`),
+                      h("input", { type: "number", min: "1", step: "any", inputMode: "decimal", value: row.quantity, disabled: !row.include, onChange: e => updateRepeatRow(row.key, { quantity: e.currentTarget.value }), className: "w-28 p-1.5 border border-slate-200 rounded-lg text-sm font-bold bg-white disabled:bg-slate-100" })
+                    ]),
+                    h("div", {}, [
+                      h("div", { className: "text-[10px] font-bold text-slate-500" }, "Old rate"),
+                      h("div", { className: `font-mono font-bold ${repeatSetup.rateMode === 'old' ? 'text-slate-900' : 'text-slate-400'}` }, `${storageService.formatCurrency(row.oldRate)} / ${row.product.unit || row.item.unit || 'unit'}`)
+                    ]),
+                    h("div", {}, [
+                      h("div", { className: "text-[10px] font-bold text-slate-500" }, "Current rate"),
+                      h("div", { className: `font-mono font-bold ${repeatSetup.rateMode === 'current' ? (row.currentRate !== row.oldRate ? 'text-amber-700' : 'text-slate-900') : 'text-slate-400'}` }, `${storageService.formatCurrency(row.currentRate)} / ${row.product.unit || row.item.unit || 'unit'}`)
+                    ])
+                  ])
+                ]))
+              ]),
+
+              oldFiles.length > 0 && h("div", { className: "space-y-2" }, [
+                h("div", { className: "font-black uppercase text-[10px] tracking-wide text-slate-600" }, `Files on ${order.orderNumber}`),
+                h("div", { className: "rounded-xl border border-slate-200 bg-white divide-y divide-slate-100" }, oldFiles.map(file =>
+                  h("div", { key: file.id || file.name, className: "flex items-center justify-between gap-3 px-3 py-2" }, [
+                    h("span", { className: "min-w-0 truncate font-semibold text-slate-700", title: file.name }, file.name),
+                    h("span", { className: `shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-black ${file.isDeletedFromCloud ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}` }, file.isDeletedFromCloud ? 'Removed after delivery' : 'Still on old job')
+                  ])
+                )),
+                h("p", { className: "text-[10px] font-semibold text-slate-500" }, `Files are not copied to the new job. Attach the file in the next step, or the designer adds it before printing. Mention ${order.orderNumber} so they can find the old file.`)
+              ])
+            ]),
+
+            h("div", { className: "flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 px-4 sm:px-6 py-3 border-t border-slate-200 bg-white" }, [
+              repeatSetup.error && h("div", { role: "alert", className: "sm:mr-auto font-bold text-rose-600" }, repeatSetup.error),
+              h("button", { type: "button", onClick: () => setRepeatSetup(null), className: "px-4 py-2 rounded-xl border border-slate-200 bg-white font-bold text-slate-700 hover:bg-slate-50 cursor-pointer" }, "Cancel"),
+              h("button", { type: "button", onClick: continueRepeatOrder, disabled: !rows.some(row => row.product), className: "px-5 py-2 rounded-xl bg-indigo-600 font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer" }, "Continue to New Order")
+            ])
+          ])
+        ]);
+      })(),
+
       isNewOrderModalOpen && h("div", { key: "newordermodal", className: "fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in" }, [
         h("div", { className: "min-w-0 bg-slate-50 rounded-2xl sm:rounded-3xl max-w-7xl w-full shadow-2xl border border-slate-200 max-h-[96vh] sm:max-h-[94vh] overflow-x-hidden overflow-y-auto" }, [
           h("div", { className: "sticky top-0 z-20 flex justify-between items-center gap-3 px-4 sm:px-6 py-4 sm:py-5 border-b border-slate-200 bg-gradient-to-r from-white via-white to-indigo-50/80 backdrop-blur-md" }, [
             h("div", { className: "flex items-center gap-3" }, [
               h("div", { className: "w-11 h-11 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-md" }, h(Icon, { name: "orders", className: "w-5 h-5" })),
-              h("div", {}, [h("div", { className: "text-[10px] font-black uppercase tracking-[.16em] text-indigo-600" }, "New Production Job"), h("h3", { className: "font-black text-xl text-slate-950" }, "Create New Print Order"), h("p", { className: "text-xs text-slate-500 mt-0.5" }, "Client, products and delivery schedule in one job.")])
+              h("div", {}, [h("div", { className: "text-[10px] font-black uppercase tracking-[.16em] text-indigo-600" }, newOrderRepeatOf ? `Repeat of ${newOrderRepeatOf.orderNumber}` : "New Production Job"), h("h3", { className: "font-black text-xl text-slate-950" }, newOrderRepeatOf ? "Create Repeat Order" : "Create New Print Order"), h("p", { className: "text-xs text-slate-500 mt-0.5" }, "Client, products and delivery schedule in one job.")])
             ]),
             h("button", { type: "button", onClick: () => { setNewOrderItems([]); setNewOrderFileBreakdownEnabled(false); setNewOrderFileBreakdown([{ id: 'breakdown-1', name: '', quantity: '', remark: '' }]); setNewOrderShowFileBreakdownOnClientDocs(true); setNewOrderMedia([]); setMediaError(''); setNewOrderErrors({}); setNewOrderProductId(''); setNewOrderProductScopeId(''); setNewOrderQuantity('1'); setNewOrderVariantQuantities({}); setIsNewOrderModalOpen(false); }, className: "w-9 h-9 flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-400 hover:text-slate-700 cursor-pointer" }, h(Icon, { name: "x" }))
           ]),
@@ -24005,7 +24205,6 @@
                   }
                 }
               }
-              const orderNum = storageService.generateNextOrderNumber();
               const orderDate = getKathmanduDateKey(new Date());
               const dueDate = storageService.dateInputToAD(form.dueDate.value);
               if (!dueDate) errors.dueDate = `Enter a valid ${settings.dateMode || 'AD'} due date. Day must exist in the selected month.`;
@@ -24022,8 +24221,10 @@
                 setIsSavingOrder(false);
                 return;
               }
-              const savedOrder = storageService.saveOrder({
-                orderNumber: orderNum,
+              // The order is shown as saved only after the server confirms it and assigns its job number.
+              let savedOrder;
+              try {
+                savedOrder = await storageService.createOrder({
                 customerId: cust.id,
                 customerName: cust.businessName || cust.name,
                 customerPhone: cust.phone,
@@ -24037,10 +24238,18 @@
                 dueDate,
                 dueTime: form.dueTime.value || '17:00',
                 status: 'New',
-                media: newOrderMedia.map(({ id, name, type, size, extension }) => ({ id, name, type, size, extension, category: 'Client Reference', uploadedAt: new Date().toISOString() }))
+                media: newOrderMedia.map(({ id, name, type, size, extension }) => ({ id, name, type, size, extension, category: 'Client Reference', uploadedAt: new Date().toISOString() })),
+                ...(newOrderRepeatOf ? { repeatOfOrderId: newOrderRepeatOf.orderId, repeatDesignMode: newOrderRepeatOf.designMode } : {})
               });
+              } catch (err) {
+                // Nothing was saved: remove the attached files from this device and keep the form open.
+                mediaStore.removeMany(newOrderMedia.map(item => item.id)).catch(() => { });
+                setIsSavingOrder(false);
+                alert(err.message || ORDER_NOT_SAVED_MESSAGE);
+                return;
+              }
               const isWalkInOrder = cust.id === PROFILE_CLIENT_ID || cust.isProfileAccount;
-              if (!isWalkInOrder || confirm(`Send WhatsApp order message to ${savedOrder.orderContactName || 'this walk-in customer'} now?`)) {
+              if (savedOrder && (!isWalkInOrder || confirm(`Send WhatsApp order message to ${savedOrder.orderContactName || 'this walk-in customer'} now?`))) {
                 storageService.sendWhatsAppStatusUpdate(savedOrder, 'New', 'new_order');
               }
               setNewOrderItems([]);
@@ -24053,6 +24262,7 @@
               setNewOrderQuantity('1');
               setNewOrderVariantQuantities({});
               setMediaError('');
+              setNewOrderRepeatOf(null);
               setIsSavingOrder(false);
               refresh();
               setIsNewOrderModalOpen(false);
@@ -24332,6 +24542,17 @@
             ]),
 
             h("div", { className: "min-w-0 space-y-4 sm:space-y-5" }, [
+
+              newOrderRepeatOf && h("div", { className: "flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 sm:p-4 shadow-sm" }, [
+                h("div", { className: "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-500 text-white" }, h(Icon, { name: "repeat", className: "w-4 h-4" })),
+                h("div", { className: "min-w-0 flex-1" }, [
+                  h("div", { className: "font-black text-amber-900" }, `Repeat of ${newOrderRepeatOf.orderNumber} • ${newOrderRepeatOf.designMode === 'same' ? 'Same design' : 'Design changes'}`),
+                  h("p", { className: "mt-0.5 text-[10px] font-semibold text-amber-800" }, newOrderRepeatOf.designMode === 'same'
+                    ? `The designer reuses the file from ${newOrderRepeatOf.orderNumber}. Dates, payment and stock start fresh for this job.`
+                    : `The designer updates the file from ${newOrderRepeatOf.orderNumber} before printing. Dates, payment and stock start fresh for this job.`)
+                ]),
+                h("button", { type: "button", title: "Make this a normal order instead", onClick: () => setNewOrderRepeatOf(null), className: "shrink-0 rounded-lg px-2 py-1 text-[10px] font-bold text-amber-800 hover:bg-amber-100 cursor-pointer" }, "Unlink")
+              ]),
 
               h("div", { className: "p-3 sm:p-4 bg-indigo-50/60 border border-indigo-200 rounded-2xl space-y-3 shadow-sm" }, [
                 h("div", { className: "flex items-center justify-between" }, [h("div", { className: "text-[10px] font-black uppercase text-indigo-700" }, `Products in This Order (${newOrderItems.length})`), h("div", { className: "text-[10px] font-bold text-indigo-600" }, "Same Job No. • Multiple Products")]),

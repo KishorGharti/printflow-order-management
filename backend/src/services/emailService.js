@@ -94,8 +94,31 @@ async function sendRegistrationOtp(toEmail, otp, recipientName = 'User', company
   return transporter.sendMail(mailOptions);
 }
 
+/**
+ * Sends the 6-digit developer console sign-in code
+ */
+async function sendDeveloperMfaCode(toEmail, otp) {
+  return transporter.sendMail({
+    from: `"PrintFlow by Algora" <${SMTP_USER}>`,
+    to: toEmail,
+    subject: 'Your developer console sign-in code',
+    text: `Your developer console sign-in code is ${otp}. It is valid for 10 minutes. If you did not try to sign in, change DEVELOPER_PASSWORD now.`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 540px; margin: 0 auto; padding: 32px 24px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; color: #0f172a;">
+        <h2 style="font-size: 20px; font-weight: 800; text-align: center; margin: 0 0 12px 0;">Developer console sign-in</h2>
+        <p style="font-size: 14px; line-height: 1.6; color: #475569; text-align: center; margin: 0 0 24px 0;">Use this code to finish signing in:</p>
+        <div style="text-align: center; margin: 28px 0;">
+          <span style="display: inline-block; padding: 14px 28px; background: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 12px; font-size: 32px; font-weight: 900; letter-spacing: 6px; font-family: monospace;">${otp}</span>
+        </div>
+        <p style="font-size: 12px; line-height: 1.6; color: #64748b; text-align: center; margin: 0;">This code is valid for <strong>10 minutes</strong>. If you did not try to sign in, change DEVELOPER_PASSWORD now.</p>
+      </div>
+    `,
+  });
+}
+
 module.exports = {
   transporter,
   sendPasswordResetOtp,
   sendRegistrationOtp,
+  sendDeveloperMfaCode,
 };

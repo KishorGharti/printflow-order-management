@@ -1,27 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-// Simulation of Printing Gate validation logic (Reference files do NOT count; only Ready to Go files)
-function validatePrintingGate({ order, enteredJobNumber, newFiles = [], designer }) {
+// Simulation of Printing Gate validation logic: only a designer is required
+function validatePrintingGate({ order, designer }) {
   if (!order) return { ok: false, error: 'No order provided' };
   if (!designer) return { ok: false, error: 'Please add and select a designer in Profile → Team before upgrading to Printing.' };
-
-  const entered = String(enteredJobNumber || '').trim().toUpperCase();
-  const target = String(order.orderNumber || '').trim().toUpperCase();
-  const hasEnteredJobNumber = entered.length > 0;
-  const isJobNumberMatch = hasEnteredJobNumber && entered === target;
-
-  if (hasEnteredJobNumber && !isJobNumberMatch) {
-    return { ok: false, error: `Job Number does not match. Enter ${order.orderNumber} or attach a design file.` };
-  }
-
-  const existingDesignFiles = (order.media || []).filter(m => m.category === 'Ready to Go');
-  const hasDesignFiles = existingDesignFiles.length > 0 || (newFiles && newFiles.length > 0);
-
-  if (!hasDesignFiles && !isJobNumberMatch) {
-    return { ok: false, error: `Please either enter the exact Job Number (${order.orderNumber}) OR upload a design file into Ready to Go.` };
-  }
-
   return { ok: true };
 }
 
@@ -44,63 +27,17 @@ function validateProgressGate({ order }) {
   return { ok: true };
 }
 
-test('Printing Gate: Blocks upgrade when neither Job Number nor Design File is provided', () => {
+test('Printing Gate: Blocks upgrade when no designer is available', () => {
   const order = { id: 'ord-1', orderNumber: 'PG-2026-0001', media: [] };
-  const designer = { id: 'tm-1', name: 'Alina' };
-  const result = validatePrintingGate({ order, enteredJobNumber: '', newFiles: [], designer });
+  const result = validatePrintingGate({ order, designer: null });
   assert.equal(result.ok, false);
-  assert.match(result.error, /Please either enter the exact Job Number/);
+  assert.match(result.error, /select a designer/);
 });
 
-test('Printing Gate: Blocks upgrade if only client reference files exist and no Job Number', () => {
-  const order = {
-    id: 'ord-1',
-    orderNumber: 'PG-2026-0001',
-    media: [
-      { id: 'm-ref-1', name: 'client-logo.png', category: 'Client Reference' }
-    ]
-  };
-  const designer = { id: 'tm-1', name: 'Alina' };
-  const result = validatePrintingGate({ order, enteredJobNumber: '', newFiles: [], designer });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /Please either enter the exact Job Number/);
-});
-
-test('Printing Gate: Allows upgrade with matching Job Number alone (no file required)', () => {
+test('Printing Gate: Allows upgrade with a designer alone (no Job Number or design file required)', () => {
   const order = { id: 'ord-1', orderNumber: 'PG-2026-0001', media: [] };
   const designer = { id: 'tm-1', name: 'Alina' };
-  const result = validatePrintingGate({ order, enteredJobNumber: 'pg-2026-0001', newFiles: [], designer });
-  assert.equal(result.ok, true);
-});
-
-test('Printing Gate: Blocks upgrade with mismatched Job Number', () => {
-  const order = { id: 'ord-1', orderNumber: 'PG-2026-0001', media: [] };
-  const designer = { id: 'tm-1', name: 'Alina' };
-  const result = validatePrintingGate({ order, enteredJobNumber: 'PG-WRONG-123', newFiles: [], designer });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /Job Number does not match/);
-});
-
-test('Printing Gate: Allows upgrade with uploaded Design File alone (no Job Number required)', () => {
-  const order = { id: 'ord-1', orderNumber: 'PG-2026-0001', media: [] };
-  const designer = { id: 'tm-1', name: 'Alina' };
-  const result = validatePrintingGate({
-    order,
-    enteredJobNumber: '',
-    newFiles: [{ id: 'm-1', name: 'banner-print.pdf', category: 'Ready to Go' }],
-    designer
-  });
-  assert.equal(result.ok, true);
-});
-
-test('Printing Gate: Allows upgrade when order already has attached Ready to Go media', () => {
-  const order = {
-    id: 'ord-1',
-    orderNumber: 'PG-2026-0001',
-    media: [{ id: 'm-0', name: 'existing-design.psd', category: 'Ready to Go' }]
-  };
-  const designer = { id: 'tm-1', name: 'Alina' };
-  const result = validatePrintingGate({ order, enteredJobNumber: '', newFiles: [], designer });
+  const result = validatePrintingGate({ order, designer });
   assert.equal(result.ok, true);
 });
 

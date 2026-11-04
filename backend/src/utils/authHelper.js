@@ -3,7 +3,17 @@
 const crypto = require('crypto');
 const { env } = require('../config/env');
 
-const SECRET_KEY = env.API_SECRET_KEY || 'printghar-secret-2026';
+// env.js already refuses to start without API_SECRET_KEY. The old built-in default is public
+// (it was in the source code), so anyone could sign tokens with it: refuse it in production.
+const PUBLISHED_DEFAULT_SECRET = 'printghar-secret-2026';
+const SECRET_KEY = env.API_SECRET_KEY;
+if (!SECRET_KEY) throw new Error('API_SECRET_KEY is required.');
+if (SECRET_KEY === PUBLISHED_DEFAULT_SECRET || SECRET_KEY.length < 16) {
+  if (env.NODE_ENV === 'production') {
+    throw new Error('API_SECRET_KEY must be a private random value of at least 16 characters (the old default is not allowed).');
+  }
+  console.warn('[Security] API_SECRET_KEY is the old public default or too short. Set a long random value in backend/.env before going live.');
+}
 const TOKEN_EXPIRY_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 /**
@@ -62,6 +72,24 @@ function verifyPassword(password, storedHash) {
 
   // Fallback for direct PIN or plaintext migration
   return passStr.trim() === hashStr;
+}
+
+/** True when a stored password is still plaintext (not bcrypt or scrypt), so it should be re-hashed. */
+function isLegacyPlaintext(storedHash) {
+  const hashStr = String(storedHash || '').trim();
+  return Boolean(hashStr) && !/^\$2[aby]\$/.test(hashStr) && !hashStr.startsWith('scrypt:');
+}
+
+/** Constant-time string comparison for secrets. */
+function safeEqual(a, b) {
+  const left = crypto.createHash('sha256').update(String(a ?? '')).digest();
+  const right = crypto.createHash('sha256').update(String(b ?? '')).digest();
+  return crypto.timingSafeEqual(left, right);
+}
+
+/** Cryptographically random 6-digit one-time code. */
+function generateOtp() {
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 /**
@@ -149,6 +177,9 @@ function sanitizeUser(user) {
 module.exports = {
   hashPassword,
   verifyPassword,
+  isLegacyPlaintext,
+  safeEqual,
+  generateOtp,
   signToken,
   verifyToken,
   sanitizeUser,

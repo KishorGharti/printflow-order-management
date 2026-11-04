@@ -2,10 +2,11 @@
 
 const { pool } = require('../config/db');
 const { env } = require('../config/env');
-const { verifyToken } = require('../utils/authHelper');
+const { verifyToken, safeEqual } = require('../utils/authHelper');
 const { ROLES, ROLE_PERMISSIONS, hasPermission } = require('../config/permissions');
 const logger = require('../utils/logger');
 const { getSecurityPolicy, checkIpWhitelist, checkIpWhitelistSync } = require('../services/securityPolicyService');
+const presence = require('../services/presenceService');
 
 let cachedGlobalRevokedAt = null;
 let lastRevokedCheckTime = 0;
@@ -55,32 +56,13 @@ async function authenticateUser(req, res, next) {
     }
 
     if (!token) {
-      if (req.headers['x-role']) {
-        const rawRole = String(req.headers['x-role']).toLowerCase().trim();
-        const role = [ROLES.DESIGNER, ROLES.PRINTER_FINISHING, ROLES.RECEPTION, ROLES.OWNER].includes(rawRole)
-          ? rawRole
-          : ROLES.RECEPTION;
-        const bizId = (req.headers['x-business-id'] && req.headers['x-business-id'] !== 'global_settings')
-          ? String(req.headers['x-business-id']).trim()
-          : 'global_settings';
-        req.user = {
-          id: 'session-' + role,
-          localId: 'session-' + role,
-          name: role === ROLES.DESIGNER ? 'Designer' : role === ROLES.PRINTER_FINISHING ? 'Printer / Finishing' : 'Staff',
-          email: `${role}@printghar.local`,
-          role,
-          businessId: bizId,
-          isActive: true,
-          permissions: ROLE_PERMISSIONS[role] || [],
-        };
-        return next();
-      }
+      // Role and business headers are only honoured for a verified token below.
       req.user = null;
       return next();
     }
 
     // 1. Master API key support (system administration / backend crons / developer console)
-    if (env.API_SECRET_KEY && token === env.API_SECRET_KEY) {
+    if (env.API_SECRET_KEY && safeEqual(token, env.API_SECRET_KEY)) {
       req.user = {
         id: 'system-master',
         name: 'Platform Developer (Super Admin)',
@@ -178,6 +160,7 @@ async function authenticateUser(req, res, next) {
         isClient: true,
         permissions: ROLE_PERMISSIONS[effectiveRole] || [],
       };
+      presence.markActive({ clientId: client.id, businessId: clientBiz });
       return next();
     }
 
@@ -209,10 +192,14 @@ async function authenticateUser(req, res, next) {
     }
 
     const requestedRole = (req.headers['x-role'] || req.headers['x-active-role'] || member.role || decoded.role || ROLES.RECEPTION).toLowerCase().trim();
-    // Non-admins cannot escalate beyond their assigned role
-    const effectiveRole = (member.role === ROLES.OWNER || member.role === ROLES.RECEPTION)
-      ? ([ROLES.DESIGNER, ROLES.PRINTER_FINISHING, ROLES.RECEPTION, ROLES.OWNER].includes(requestedRole) ? requestedRole : member.role)
-      : member.role;
+    // A member may switch down to a role with fewer rights, never up: an owner can work as any staff
+    // role, reception only as reception/designer/printer. Everyone else keeps their assigned role.
+    const switchableRoles = member.role === ROLES.OWNER
+      ? [ROLES.DESIGNER, ROLES.PRINTER_FINISHING, ROLES.RECEPTION, ROLES.OWNER]
+      : member.role === ROLES.RECEPTION
+        ? [ROLES.DESIGNER, ROLES.PRINTER_FINISHING, ROLES.RECEPTION]
+        : [];
+    const effectiveRole = switchableRoles.includes(requestedRole) ? requestedRole : member.role;
 
     req.user = {
       id: member.id,
@@ -225,6 +212,7 @@ async function authenticateUser(req, res, next) {
       jobTitle: member.job_title,
       permissions: ROLE_PERMISSIONS[effectiveRole] || [],
     };
+    presence.markActive({ businessId: req.user.businessId });
 
     next();
   } catch (err) {
@@ -321,7 +309,7 @@ function requireDeveloperAccess(req, res, next) {
 
 /**
  * Multi-tenant resolver: extracts businessId strictly from authenticated user.
- * Falls back to 'global_settings' for legacy unauthenticated dev requests.
+ * Falls back to 'global_settings' when there is no verified user.
  * Only SUPER_ADMIN / DEVELOPER may override businessId via header/query for admin operations.
  */
 function getTenantBusinessId(req) {
@@ -334,9 +322,7 @@ function getTenantBusinessId(req) {
       return req.user.businessId;
     }
   }
-  if (req.headers && req.headers['x-business-id']) {
-    return String(req.headers['x-business-id']).trim();
-  }
+  // Without a verified login the X-Business-Id header is not trusted.
   return 'global_settings';
 }
 

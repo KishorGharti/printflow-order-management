@@ -80,15 +80,16 @@ const uploadDesign = async (req, res, next) => {
     // If orderId or orderNumber provided, automatically attach to Order in PostgreSQL
     if (orderId || orderNumber) {
       const isUuid = orderId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orderId);
+      // $1 is the new file, $2 the order key, $3 the shop.
       const where = orderId
-        ? (isUuid ? 'id = $1' : 'local_id = $1')
-        : 'order_number = $1';
+        ? (isUuid ? 'id = $2' : 'local_id = $2')
+        : 'order_number = $2';
       const key = orderId || orderNumber;
 
       try {
         await pool.query(
-          `UPDATE orders SET media = COALESCE(media, '[]'::jsonb) || $1::jsonb WHERE ${where}`,
-          [JSON.stringify([mediaItem]), key]
+          `UPDATE orders SET media = COALESCE(media, '[]'::jsonb) || $1::jsonb WHERE ${where} AND business_id = $3`,
+          [JSON.stringify([mediaItem]), key, getTenantBusinessId(req)]
         );
       } catch (dbErr) {
         logger.warn(`Could not attach media to order ${key}: ${dbErr.message}`);
@@ -124,6 +125,29 @@ function extractCloudinaryPublicId(url) {
   return match ? match[1] : '';
 }
 
+/** Shop id as used in branding file names (letters, digits and "-" only). */
+function brandingTag(businessKey) {
+  return String(businessKey || 'shop').replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 60) || 'shop';
+}
+
+/**
+ * A shop may delete only its own branding files: the ones saved in its settings, or files whose
+ * name starts with its shop id (every design uploaded from now on is named that way).
+ */
+function ownsBrandingFile(publicId, businessKey, currentSettings) {
+  if (!publicId) return false;
+  const saved = [];
+  if (currentSettings) {
+    const bill = currentSettings.bill_reference_config || {};
+    const chalan = currentSettings.chalan_reference_config || {};
+    saved.push(bill.companyDesignPublicId, extractCloudinaryPublicId(bill.companyDesign),
+      chalan.companyDesignPublicId, extractCloudinaryPublicId(chalan.companyDesign),
+      extractCloudinaryPublicId(currentSettings.shop_logo));
+  }
+  if (saved.filter(Boolean).includes(publicId)) return true;
+  return String(publicId).startsWith(`printghar/branding/${brandingTag(businessKey)}__`);
+}
+
 /**
  * POST /api/upload/company-design
  * Uploads bill/chalan company design or branding to Cloudinary,
@@ -138,15 +162,18 @@ const uploadCompanyDesign = async (req, res, next) => {
 
     const businessKey = getTenantBusinessId(req);
     const target = req.body.target || req.query.target || 'bill'; // 'bill' | 'chalan' | 'logo'
+    if (!['bill', 'chalan', 'logo'].includes(target)) {
+      return res.status(400).json({ error: 'Unknown design target.' });
+    }
     const folder = 'printghar/branding';
     const timestamp = Date.now();
-    const publicId = `${target}_design_${timestamp}`;
+    const publicId = `${brandingTag(businessKey)}__${target}_design_${timestamp}`;
 
     // 1. Fetch current settings to identify existing public_id
     const { rows } = await pool.query('SELECT * FROM settings WHERE key = $1', [businessKey]);
     const currentSettings = rows.length ? rows[0] : null;
 
-    let previousPublicId = req.body.previousPublicId || '';
+    let previousPublicId = ownsBrandingFile(req.body.previousPublicId, businessKey, currentSettings) ? req.body.previousPublicId : '';
     if (!previousPublicId && currentSettings) {
       if (target === 'bill') {
         const cfg = currentSettings.bill_reference_config || {};
@@ -250,6 +277,10 @@ const deleteCompanyDesign = async (req, res, next) => {
 
     const { rows } = await pool.query('SELECT * FROM settings WHERE key = $1', [businessKey]);
     const currentSettings = rows.length ? rows[0] : null;
+    if (publicId && !ownsBrandingFile(publicId, businessKey, currentSettings)) {
+      logger.warn(`Refused to delete branding file not owned by ${businessKey}: ${publicId}`);
+      publicId = '';
+    }
 
     if (!publicId && currentSettings) {
       if (target === 'bill') {
@@ -453,8 +484,18 @@ const deleteFile = async (req, res, next) => {
   try {
     const { publicId, resourceType = 'image', orderId, mediaId } = req.body;
 
-    if (!publicId) {
-      return res.status(400).json({ error: 'publicId is required.' });
+    if (!publicId || !orderId || !mediaId) {
+      return res.status(400).json({ error: 'publicId, orderId and mediaId are required.' });
+    }
+
+    // The file must be attached to an order of the signed-in shop.
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orderId);
+    const where = isUuid ? 'id = $1' : 'local_id = $1';
+    const { rows } = await pool.query(`SELECT id, media FROM orders WHERE ${where} AND business_id = $2`, [orderId, getTenantBusinessId(req)]);
+    const owned = rows.length && Array.isArray(rows[0].media)
+      && rows[0].media.some((m) => m && m.id === mediaId && m.cloudinaryPublicId === publicId);
+    if (!owned) {
+      return res.status(404).json({ error: 'File not found on this order.' });
     }
 
     let destroyResult = { result: 'ok' };
@@ -462,10 +503,7 @@ const deleteFile = async (req, res, next) => {
       destroyResult = await deleteResource(publicId, resourceType);
     }
 
-    if (orderId && mediaId) {
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orderId);
-      const where = isUuid ? 'id = $1' : 'local_id = $1';
-      const { rows } = await pool.query(`SELECT id, media FROM orders WHERE ${where}`, [orderId]);
+    {
       if (rows.length && Array.isArray(rows[0].media)) {
         const updated = rows[0].media.map((m) => {
           if (m.id === mediaId) {

@@ -1,10 +1,22 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 import { after, before, test } from 'node:test';
 
 const port = 31000 + Math.floor(Math.random() * 1000);
 const origin = `http://127.0.0.1:${port}`;
 let server;
+
+// Stand-in for the Express backend: it answers the WhatsApp sign-in check and records what the
+// front server forwards, so no real backend or database is needed.
+const SIGNED_IN = { Authorization: 'Bearer valid-test-token' };
+const forwarded = [];
+const backend = http.createServer((req, res) => {
+  forwarded.push({ url: req.url, xff: req.headers['x-forwarded-for'] });
+  const ok = req.url === '/api/auth/me' ? req.headers.authorization === SIGNED_IN.Authorization : true;
+  res.writeHead(ok ? 200 : 401, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(ok ? { ok: true } : { error: 'Not authenticated.' }));
+});
 
 const waitForServer = async () => {
   const deadline = Date.now() + 5000;
@@ -21,11 +33,14 @@ const waitForServer = async () => {
 };
 
 before(async () => {
+  await new Promise((resolve) => backend.listen(0, '127.0.0.1', resolve));
   server = spawn(process.execPath, ['server.js'], {
     cwd: new URL('../', import.meta.url),
     env: {
       ...process.env,
       PORT: String(port),
+      BACKEND_PORT: String(backend.address().port),
+      TRUST_PROXY: '',
       WHATSAPP_ACCESS_TOKEN: '',
       WHATSAPP_PHONE_NUMBER_ID: ''
     },
@@ -36,6 +51,7 @@ before(async () => {
 
 after(() => {
   if (server && !server.killed) server.kill();
+  backend.close();
 });
 
 test('serves the app with security headers', async () => {
@@ -61,7 +77,7 @@ test('serves client routes without exposing project files', async () => {
   assert.match(appScript, /psb.*ai.*eps.*svg.*cdr.*dxf.*dwg/);
   assert.match(appScript, /Keyboard shortcuts/);
   assert.match(appScript, /Back to top/);
-  assert.match(appScript, /Enter Job Number \*/);
+  assert.match(appScript, /Confirm Upgrade to Printing/);
   assert.match(appScript, /before moving .* to Progress/);
   for (const privatePath of ['/server.js', '/package.json', '/src/types/index.ts', '/README_RUNTIME.txt']) {
     assert.equal((await fetch(`${origin}${privatePath}`)).status, 404, privatePath);
@@ -69,12 +85,12 @@ test('serves client routes without exposing project files', async () => {
 });
 
 test('rejects malformed or non-JSON API requests', async () => {
-  const wrongType = await fetch(`${origin}/api/whatsapp`, { method: 'POST', body: 'hello' });
+  const wrongType = await fetch(`${origin}/api/whatsapp`, { method: 'POST', headers: SIGNED_IN, body: 'hello' });
   assert.equal(wrongType.status, 415);
 
   const malformed = await fetch(`${origin}/api/whatsapp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...SIGNED_IN, 'Content-Type': 'application/json' },
     body: '{not-json'
   });
   assert.equal(malformed.status, 400);
@@ -83,7 +99,7 @@ test('rejects malformed or non-JSON API requests', async () => {
 test('never accepts a WhatsApp token supplied by the browser', async () => {
   const response = await fetch(`${origin}/api/whatsapp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...SIGNED_IN, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       to: '9779800000000',
       message: 'test',
@@ -97,7 +113,7 @@ test('never accepts a WhatsApp token supplied by the browser', async () => {
 test('WhatsApp document endpoint requires multipart PDF and server credentials', async () => {
   const wrongType = await fetch(`${origin}/api/whatsapp/document`, {
     method:'POST',
-    headers:{ 'Content-Type':'application/json' },
+    headers:{ ...SIGNED_IN, 'Content-Type':'application/json' },
     body:JSON.stringify({ to:'9779800000000' })
   });
   assert.equal(wrongType.status, 415);
@@ -106,7 +122,24 @@ test('WhatsApp document endpoint requires multipart PDF and server credentials',
   form.append('to', '9779800000000');
   form.append('filename', 'statement.pdf');
   form.append('document', new Blob(['%PDF-1.4\n%%EOF'], { type:'application/pdf' }), 'statement.pdf');
-  const unconfigured = await fetch(`${origin}/api/whatsapp/document`, { method:'POST', body:form });
+  const unconfigured = await fetch(`${origin}/api/whatsapp/document`, { method:'POST', headers: SIGNED_IN, body:form });
   assert.equal(unconfigured.status, 503);
   assert.match((await unconfigured.json()).error, /not configured/i);
+});
+
+test('WhatsApp relay refuses anyone who is not signed in', async () => {
+  for (const path of ['/api/whatsapp', '/api/whatsapp/document']) {
+    const none = await fetch(`${origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    assert.equal(none.status, 401, path);
+    const fake = await fetch(`${origin}${path}`, { method: 'POST', headers: { Authorization: 'Bearer forged', 'Content-Type': 'application/json' }, body: '{}' });
+    assert.equal(fake.status, 401, path);
+  }
+});
+
+test('the backend gets the real client address, not one typed by the browser', async () => {
+  await fetch(`${origin}/api/anything`, { headers: { 'X-Forwarded-For': '6.6.6.6' } });
+  const seen = forwarded.filter((f) => f.url === '/api/anything').pop();
+  assert.ok(seen, 'request was proxied');
+  assert.doesNotMatch(String(seen.xff), /6\.6\.6\.6/);
+  assert.match(String(seen.xff), /127\.0\.0\.1/);
 });

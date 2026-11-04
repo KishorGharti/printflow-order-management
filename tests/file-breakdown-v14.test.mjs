@@ -14,19 +14,19 @@ test('grouped file breakdown stores one production quantity from child file quan
 test('production keeps one parent item while Bill and Chalan can expand child designs', () => {
   assert.match(app, /Production stays one total line/);
   assert.match(app, /const expandGroupedItemsForDocuments/);
-  assert.match(app, /productName:`\$\{row\.name\} \(\$\{parentName\}\)`/);
+  assert.match(app, /productName:\s*`\$\{row\.name\} \(\$\{parentName\}\)`/);
 });
 
 test('Bill uses expanded grouped rows without exposing internal print instructions', () => {
   const billStart = app.indexOf('const createReferenceBillPdf');
   const chalanStart = app.indexOf('const createReferenceChalanPdf');
   const bill = app.slice(billStart, chalanStart);
-  assert.match(bill, /const items=expandGroupedItemsForDocuments\(sourceItems\)/);
-  assert.match(bill, /const productName=item\?String\(item\.productName\|\|'Product'\):''/);
+  assert.match(bill, /const items\s*=\s*expandGroupedItemsForDocuments\(sourceItems\)/);
+  assert.match(bill, /const productName\s*=\s*item\s*\?\s*documentItemDescription\(item,\s*order\)\s*:\s*''/);
   assert.equal(bill.includes('item.itemDescription'), false);
 });
 
 test('order edit screen can maintain file breakdown after order creation', () => {
   assert.match(app, /Grouped file \/ design details/);
-  assert.match(app, /const fileBreakdown=normalizeFileBreakdown\(it\.fileBreakdown\)/);
+  assert.match(app, /const fileBreakdown\s*=\s*normalizeFileBreakdown\(it\.fileBreakdown\)/);
 });

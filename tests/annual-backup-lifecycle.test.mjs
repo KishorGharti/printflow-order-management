@@ -59,6 +59,6 @@ test('1-Year Monthly Backup Local Download & Cloudinary Purge Lifecycle', async 
 
   // 8. Notification Bell & UI Integration Verification
   assert.ok(distApp.includes('Annual Cloud Backup (1-Year Rollover)'), 'dist/app.js must render Annual Cloud Backup rollover section in bell panel');
-  assert.ok(distApp.includes('📥 Download 1-Year Backup'), 'dist/app.js must render Download 1-Year Backup button');
-  assert.ok(distApp.includes('🧹 Purge Cloudinary'), 'dist/app.js must render Purge Cloudinary button');
+  assert.ok(distApp.includes('"Download 1-Year Backup"'), 'dist/app.js must render Download 1-Year Backup button');
+  assert.ok(distApp.includes('"Purge Cloudinary"'), 'dist/app.js must render Purge Cloudinary button');
 });

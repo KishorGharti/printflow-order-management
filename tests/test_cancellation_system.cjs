@@ -14,8 +14,11 @@ async function request(path, options = {}) {
     }
   });
   const data = await res.json().catch(() => null);
+  // Remember every order this script creates so cleanup removes exactly those rows.
+  if (path === '/orders' && options.method === 'POST' && data && (data._id || data.id)) createdOrderIds.push(data._id || data.id);
   return { status: res.status, ok: res.ok, data };
 }
+const createdOrderIds = [];
 
 async function runTests() {
   console.log('🧪 Starting PrintFlow Order Cancellation System Test Suite...\n');
@@ -291,14 +294,15 @@ async function runTests() {
       body: JSON.stringify({ status: 'Cancelled', cancelReason: 'Wrong paper' })
     });
 
-    const listRes = await request(`/orders?search=${orderNum}`);
+    // Job numbers are assigned by the server, so search by the number it returned.
+    const listRes = await request(`/orders?search=${createRes.data.orderNumber}`);
     assert.strictEqual(listRes.status, 200);
     assert.ok(listRes.data.orders.length > 0, 'Cancelled order must appear in search/list');
     assert.strictEqual(listRes.data.orders[0].status, 'Cancelled');
   });
 
   // Clean up test orders from database
-  await pool.query(`DELETE FROM orders WHERE order_number LIKE 'TEST-%'`);
+  if (createdOrderIds.length) await pool.query('DELETE FROM orders WHERE id = ANY($1::uuid[])', [createdOrderIds]);
 
   console.log(`\n========================================`);
   console.log(`Tests Completed: ${passed} Passed, ${failed} Failed`);

@@ -2,6 +2,7 @@
 
 const { env } = require('../config/env');
 const logger = require('../utils/logger');
+const { safeEqual } = require('../utils/authHelper');
 
 /**
  * POST /api/whatsapp/send
@@ -63,7 +64,9 @@ const verifyWebhook = (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === env.API_SECRET_KEY) {
+  // Use a dedicated verify token; the API secret is only a fallback for existing setups.
+  const expected = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || env.API_SECRET_KEY;
+  if (mode === 'subscribe' && token && expected && safeEqual(token, expected)) {
     logger.info('WhatsApp webhook verified.');
     return res.status(200).send(challenge);
   }

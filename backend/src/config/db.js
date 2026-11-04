@@ -67,10 +67,16 @@ async function ensureRbacColumns(client) {
       ALTER TABLE saas_clients ADD COLUMN IF NOT EXISTS shop_code TEXT;
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS business_id TEXT NOT NULL DEFAULT 'global_settings';
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TEXT NOT NULL DEFAULT '';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS mistake_at TEXT NOT NULL DEFAULT '';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS mistake_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS mistake_reason TEXT NOT NULL DEFAULT '';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS mistake_by TEXT NOT NULL DEFAULT '';
       ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
       ALTER TABLE orders ADD CONSTRAINT orders_status_check
         CHECK (status IN ('New', 'In Design', 'Design', 'Ready to Go', 'Printing', 'Finishing', 'Progress', 'Done', 'Ready', 'Payment', 'Pickup', 'Delivery', 'Cancelled', 'Mistake'));
       ALTER TABLE expenses ADD COLUMN IF NOT EXISTS business_id TEXT NOT NULL DEFAULT 'global_settings';
+      ALTER TABLE expenses ADD COLUMN IF NOT EXISTS linked_order_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE expenses ADD COLUMN IF NOT EXISTS mistake_expense BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS business_id TEXT NOT NULL DEFAULT 'global_settings';
       ALTER TABLE products ADD COLUMN IF NOT EXISTS business_id TEXT NOT NULL DEFAULT 'global_settings';
       ALTER TABLE stock_items ADD COLUMN IF NOT EXISTS business_id TEXT NOT NULL DEFAULT 'global_settings';
@@ -145,11 +151,42 @@ async function ensureRbacColumns(client) {
   } catch (_) {}
 }
 
+/**
+ * Server-side job / invoice number counters (additive; existing data is never renumbered).
+ * Kept separate from ensureRbacColumns so a failure here is logged instead of swallowed.
+ */
+async function ensureNumberCounters(client) {
+  const { COUNTERS_TABLE_SQL } = require('../services/numberingService');
+  try {
+    await client.query(COUNTERS_TABLE_SQL);
+  } catch (err) {
+    logger.error(`❌ Could not create number_counters table: ${err.message}`);
+  }
+}
+
+/**
+ * Repeat-job link columns on orders (additive). Kept separate so a failure is logged, not swallowed.
+ */
+async function ensureRepeatOrderColumns(client) {
+  try {
+    await client.query(`
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS repeat_of_order_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS repeat_of_order_number TEXT NOT NULL DEFAULT '';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS repeat_design_mode TEXT NOT NULL DEFAULT '';
+      CREATE INDEX IF NOT EXISTS orders_repeat_of_idx ON orders(business_id, repeat_of_order_id) WHERE repeat_of_order_id <> '';
+    `);
+  } catch (err) {
+    logger.error(`❌ Could not add repeat order columns: ${err.message}`);
+  }
+}
+
 async function connectDB() {
   try {
     const client = await pool.connect();
     await client.query('SELECT 1');
     await ensureRbacColumns(client);
+    await ensureNumberCounters(client);
+    await ensureRepeatOrderColumns(client);
     client.release();
     isConnected = true;
     logger.info('✅ PostgreSQL connected → printflow database (RBAC schema verified)');

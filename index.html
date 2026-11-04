@@ -4,10 +4,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Print Ghar — Order Manager</title>
+  <title>Print Ghar | Order Manager</title>
   <meta name="description" content="Print Ghar order, customer, production, stock and payment management." />
   <link rel="icon" type="image/svg+xml"
-    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%234f46e5'/%3E%3Cpath d='M18 27V13h28v14M17 48H12a6 6 0 0 1-6-6V28a6 6 0 0 1 6-6h40a6 6 0 0 1 6 6v14a6 6 0 0 1-6 6h-5' fill='none' stroke='white' stroke-width='5' stroke-linejoin='round'/%3E%3Crect x='17' y='38' width='30' height='18' rx='3' fill='white'/%3E%3Ccircle cx='49' cy='31' r='2.5' fill='%2306b6d4'/%3E%3C/svg%3E" />
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%231f2328'/%3E%3Cpath d='M32 10c9 12.5 16 20.5 16 30.5a16 16 0 0 1-32 0C16 30.5 23 22.5 32 10z' fill='white'/%3E%3C/svg%3E" />
 
   <!-- Instant Auth Check: Redirect unauthenticated visitors directly to dedicated login portal without downloading CDNs -->
   <script>
@@ -1436,6 +1436,148 @@
       .designer-grid main {
         min-height: 460px;
       }
+    }
+  </style>
+  <style id="printghar-refinement">
+    /* Print Ghar visual refinement layer (presentation only).
+       Loaded after the theme above. Brand colours still come from each shop's
+       Settings through --brand-primary, so no saved preference is overridden. */
+    :root {
+      --pgx-ink: #1f2328;
+      --pgx-radius-control: 8px;
+      --pgx-radius-card: 12px;
+      --pgx-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.05);
+      --pgx-shadow-raised: 0 4px 12px rgba(15, 23, 42, 0.08);
+    }
+
+    /* Flat surfaces instead of ambient glows */
+    body {
+      background: var(--brand-surface) !important;
+    }
+    .app-sidebar {
+      background: var(--brand-sidebar) !important;
+      box-shadow: none;
+    }
+    header,
+    nav[class*="sticky"],
+    div[class*="sticky"][class*="top-0"] {
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+    html:not([data-theme="dark"]) header,
+    html:not([data-theme="dark"]) nav[class*="sticky"],
+    html:not([data-theme="dark"]) div[class*="sticky"][class*="top-0"] {
+      background-color: #ffffff;
+      box-shadow: 0 1px 0 var(--brand-border);
+    }
+
+    /* Glass blur only behind modal overlays */
+    [class*="backdrop-blur"]:not(.fixed) {
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+
+    /* Modest, consistent corner radii */
+    .rounded-3xl,
+    main .rounded-3xl {
+      border-radius: var(--pgx-radius-card) !important;
+    }
+    .rounded-2xl,
+    main .rounded-2xl {
+      border-radius: 10px !important;
+    }
+    main .rounded-xl {
+      border-radius: var(--pgx-radius-control) !important;
+    }
+    button.rounded-full,
+    a.rounded-full,
+    label.rounded-full,
+    [role="button"].rounded-full,
+    button.rounded-2xl,
+    button.rounded-3xl,
+    button.rounded-xl {
+      border-radius: var(--pgx-radius-control) !important;
+    }
+    input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+    select,
+    textarea {
+      border-radius: var(--pgx-radius-control) !important;
+    }
+
+    /* Decorative gradients become solid surfaces of the same hue */
+    [class*="bg-gradient-to-"] {
+      background-image: none !important;
+    }
+    [class*="bg-gradient-to-"].from-indigo-500,
+    [class*="bg-gradient-to-"].from-indigo-600,
+    [class*="bg-gradient-to-"].from-indigo-700 {
+      background-color: var(--brand-primary) !important;
+    }
+    [class*="bg-gradient-to-"].from-slate-900,
+    [class*="bg-gradient-to-"].from-slate-950,
+    [class*="bg-gradient-to-"].from-violet-700 {
+      background-color: var(--pgx-ink) !important;
+    }
+    [class*="bg-gradient-to-"].from-blue-700 { background-color: #1d4ed8 !important; }
+    [class*="bg-gradient-to-"].from-cyan-700 { background-color: #0e7490 !important; }
+    [class*="bg-gradient-to-"].from-red-700 { background-color: #b91c1c !important; }
+    [class*="bg-gradient-to-"].from-amber-600 { background-color: #b45309 !important; }
+    [class*="bg-gradient-to-"].from-white { background-color: #ffffff !important; }
+    [class*="bg-gradient-to-"].from-emerald-50\/90 { background-color: #ecfdf5 !important; }
+    [class*="bg-gradient-to-"].from-indigo-50\/70 {
+      background-color: color-mix(in srgb, var(--brand-primary) 6%, white 94%) !important;
+    }
+    html[data-theme="dark"] [class*="bg-gradient-to-"].from-white,
+    html[data-theme="dark"] [class*="bg-gradient-to-"].from-emerald-50\/90,
+    html[data-theme="dark"] [class*="bg-gradient-to-"].from-indigo-50\/70 {
+      background-color: var(--brand-card) !important;
+    }
+
+    /* Restrained shadows: no coloured glow */
+    [class*="shadow-indigo-"],
+    [class*="shadow-violet-"],
+    [class*="shadow-purple-"],
+    [class*="shadow-sky-"],
+    [class*="shadow-cyan-"],
+    [class*="shadow-emerald-"],
+    [class*="shadow-rose-"],
+    [class*="shadow-amber-"],
+    [class*="shadow-blue-"] {
+      --tw-shadow-color: rgba(15, 23, 42, 0.08) !important;
+    }
+    main .shadow-xl,
+    main .shadow-2xl,
+    main .shadow-lg {
+      --tw-shadow: var(--pgx-shadow-raised) !important;
+      box-shadow: var(--pgx-shadow-raised) !important;
+    }
+    button[class*="shadow"] {
+      box-shadow: var(--pgx-shadow-card) !important;
+    }
+
+    /* Calmer motion: keep loading spinners and skeleton pulses only */
+    .animate-bounce,
+    .animate-ping {
+      animation: none !important;
+    }
+    button:hover {
+      filter: none;
+    }
+
+    /* Readable placeholders */
+    input::placeholder,
+    textarea::placeholder {
+      font-weight: 400 !important;
+    }
+
+    /* Locked (read-only) fields look clearly different from editable ones */
+    input[aria-readonly="true"]:not([type="checkbox"]):not([type="radio"]):not([type="color"]) {
+      background: #f1f3f5 !important;
+      color: #6b7178 !important;
+      cursor: not-allowed;
+    }
+    html[data-theme="dark"] input[aria-readonly="true"]:not([type="checkbox"]):not([type="radio"]):not([type="color"]) {
+      background: var(--brand-surface) !important;
     }
   </style>
 </head>

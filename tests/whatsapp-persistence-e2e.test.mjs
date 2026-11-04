@@ -28,10 +28,10 @@ test('WhatsApp Settings: WhatsApp form renders with dynamic key and persists all
 });
 
 test('WhatsApp Settings: Multi-tenant business_id isolation is supported in settingsController', () => {
-  // getBusinessKey supports x-business-id, business-id, query, or body business_id
-  assert.match(settingsControllerJs, /function\s+getBusinessKey\s*\(req\)\s*\{/);
-  assert.match(settingsControllerJs, /req\.headers\?\.\[['"]x-business-id['"]\]/);
-  assert.match(settingsControllerJs, /req\.query\?\.business_id/);
+  // getBusinessKey resolves the tenant from the authenticated user, never from raw request headers/query
+  assert.match(settingsControllerJs, /function\s+getBusinessKey\s*\(req\)\s*\{\s*return\s+getTenantBusinessId\(req\);/);
+  assert.doesNotMatch(settingsControllerJs, /req\.headers\??\.?\[['"]x-business-id['"]\]/);
+  assert.doesNotMatch(settingsControllerJs, /req\.query\??\.business_id/);
 
   // getSettings and updateSettings use the isolated business key
   assert.match(settingsControllerJs, /const\s+key\s*=\s*getBusinessKey\(req\);[\s\S]*?SELECT \* FROM settings WHERE key = \$1/);
